@@ -1,0 +1,780 @@
+﻿/*
+ * modelFmHeatmap.ajs
+ * Synchronize and visualize heatmap values between an external XLSX and an ArchiMate model.
+ * Modularized for maintainability, audit, and reusability.
+ *
+ * Dependencies:
+ *   - xlsx.full.min.js      (SheetJS, loaded via absolute path)
+ *   - data_utils.ajs        (Transformation helpers, see below)
+ *   - logger.ajs            (Structured JSON logger, see below)
+ *
+ * Usage:
+ *   - Place all .ajs files in a secure, accessible location.
+ *   - Update the file paths in this script as needed.
+ *   - Configure thresholds, header mapping, and logging as appropriate.
+ */
+
+// Load shared libraries from ./lib
+  const libPath = __DIR__ + 'lib\\';
+  const utils  = require(libPath + 'common_utils.ajs');
+  const logger = require(libPath + 'logger.ajs');
+
+  const { readCSV,
+          getActiveModel,          
+          unescapeString,          
+          normalizeFolderName,
+          getRootFolders,
+          getSubfolders,          
+          promptForFile,
+          getRowValue
+        } = utils;
+  const { log, 
+          debug, 
+          warn, 
+          error 
+        } = logger;
+
+/////////// CONFIGURATION //////////////////////////////
+
+var CONFIG = {
+    // boolean control flags
+    debug: true,
+    createFolders: true,
+    createElements: true,
+    createViews:     true,    // NEW: whether to create domain views
+    createCSV: true,
+    viewSuffix:     "Heatmap",  // suffix for view names
+    // Absolute paths are best practice for jArchi scripts.
+    xlsxPath:            "C:\\myWorkspace\\WS_Archi\\MSA-RA\\heatmap.xlsx",
+    sheetJsPath:         "C:\\myWorkspace\\WS_Archi\\scripts\\my-scripts-collection\\MSA-RA\\lib\\xlsx.full.min.js",
+    dataUtilsPath:       "C:\\myWorkspace\\WS_Archi\\scripts\\my-scripts-collection\\MSA-RA\\lib\\data_utils.ajs",
+    loggerPath:          "C:\\myWorkspace\\WS_Archi\\scripts\\my-scripts-collection\\MSA-RA\\lib\\logger.ajs",
+    outcsvPath:          "C:\\myWorkspace\\WS_Archi\\MSA-RA\\output.csv",
+    sheetName:           "Sheet1",  // Adjust as needed
+    thresholds: { low: 3, medium: 7 }, // Example thresholds
+    heatmapCSVselectPromptTitle:"Select the heatmap CSV File",
+    csvFilter:[{name:"CSV Files",extensions:["csv"]}],
+    csvDelimiter: ",",
+    headerMap: {
+        "_id": "_id",
+        "ABB Name": "ABB Name",
+        "Function Name": "Functional composition",
+        "Description": "Description",
+        "Pri Domain": "Pri Domain",
+        "Taxonomy Domain": "Taxonomy Classification",
+        "Level": "Level",
+        "nameMatch": "nameMatch",
+        "descMatch": "descMatch",
+        "modelOnly": "modelOnly",
+        "ID": "ID",
+        "Type": "Type",
+        "Grouped Under": "Grouped_under",
+        "inView": "inView"
+    },        
+    headerRowIndex: 0,
+    requiredColumns: ["ABB Name", "Functional composition", "Description", "Pri Domain",
+                      "Taxonomy Classification", "Level", "Type",
+                      "Grouped_under", "inView"],
+    propertyNames: {
+        name: "Functional composition", abb: "ABB Name", type: "Type",
+        description: "Description", taxonomy: "Taxonomy Classification",
+        level: "Level", modelOnly: "modelOnly", grouped: "Grouped_under",
+        inView: "inView", domain: "Pri Domain", id: "_id"
+    },
+    defaultType: "resource",
+    taxonomy: {
+        delimiter: ";",
+        heatMapFolder: "HeatMap"
+    },
+    taxonomySegments: [
+        "Business Logic",
+        "Communications",
+        "Deployment",
+        "Development",
+        "Governance",
+        "Information and Data",
+        "Information_Data",
+        "Infrastructure",
+        "Interactions",
+        "Observability",
+        "Operations",
+        "Security",
+        "Telemetry"
+    ],
+    outputCSVheaders: [
+        "id",
+        "key", 
+        "Name", 
+        "Domain", 
+        "Description", 
+        "Type", 
+        "Level", 
+        "ID", 
+        "groupedUnder", 
+        "inView"
+    ],
+    escapeMap: {
+        "#comma#": ",",
+        "#squote#": "'",
+        "#dquote#": '"',
+        "#tab#": "\t",
+        "#linebreak#": "\n"
+    },
+};
+
+/////////// END CONFIGURATION //////////////////////////
+
+function promptForCSVFile(){
+    var file=window.promptOpenFile({title:"Select CSV File",filters:[{name:"CSV Files",extensions:["csv"]}]});
+    if(!file)throw new Error("No file selected");
+    return file;
+}
+
+/**
+ * Reads data from a parsed CSV and returns an array of objects.
+ * Each object has: key (Domain|Name), Name, Domain, Description, Type, Level, ID, groupedUnder, inView.
+ * This function does not validate types or track stats; all validation is in the caller.
+ * @param {object} csv - Parsed CSV from readCSV()
+ * @returns {Array} Array of objects ready for main processing
+ */
+function getDomainNameObjectArrayFromCSV(csv) {
+    if (!csv || !csv.data || !Array.isArray(csv.data)) {
+        error("[ERROR] getDomainNameObjectArrayFromCSV: Invalid CSV input.");
+        return [];
+    }
+    var result = [];
+    const pn = CONFIG.propertyNames;
+
+    csv.data.forEach(function(row, idx) {
+        const pname = pn.name;
+        const pabb  = pn.abb;
+        const ptype = pn.type;
+
+        var name = getRowValue(row, pname) || getRowValue(row, pabb);
+        var type = getRowValue(row, ptype);
+        var normalizedType = (type || CONFIG.defaultType).toLowerCase().replace(/\s+/g, "-");        
+        var domain = getRowValue(row, pn.domain) || getRowValue(row, pn.taxonomy);
+
+        // 1) Check your required fields up front
+        if (!name || !domain) {
+            debug(
+              "[ERROR] Row " + (idx + 1) + 
+              " error: Missing Name or Domain. Skipping row."
+            );
+            return; // ← skip the rest of this iteration entirely
+        }      
+
+        // 2) Now that we know we have the data, declare & populate obj
+        var obj = {
+            id: getRowValue(row, pn.id) || "",
+            key: (domain ? domain : "") + (domain ? "|" : "") + (name ? name : ""),           
+            Name: name || "",
+            Domain: domain || "",
+            Description: getRowValue(row, pn.description) || "",
+            Type: normalizedType || "",
+            Level: getRowValue(row, pn.level) || "",
+            ID: getRowValue(row, "ID") || "",
+            groupedUnder: getRowValue(row, pn.grouped) || "",
+            inView: getRowValue(row, pn.inView) || ""
+        };
+        result.push(obj);
+    });
+
+    log(`[INFO] getDomainNameObjectArrayFromCSV: Created ${result.length} objects from ${csv.data.length} rows.`);
+    return result;
+}
+
+/**
+ * Writes an array of objects (with .key and standard fields) to a CSV file.
+ * @param {Array} objArray - Array of objects as created by getDomainNameObjectArrayFromCSV
+ * @param {string} outputFilePath - Absolute path to write the new CSV file
+ */
+function writeDomainNameObjArrayToCSV(objArray, outputFilePath) {
+    if (!Array.isArray(objArray) || objArray.length === 0) {
+        log("[WARN] writeDomainNameObjArrayToCSV: Empty or invalid object array, nothing to write.");
+        return;
+    }
+    if (!outputFilePath) {
+        error("[ERROR] writeDomainNameObjArrayToCSV: Output file path is required.");
+        return;
+    }
+    // Define header order
+    var headers = CONFIG.outputCSVheaders;
+    var csvLines = [headers.join(",")];
+    objArray.forEach(function(obj) {
+        var row = headers.map(function(h) {
+            var val = obj[h];
+            // Only treat undefined/null as empty string, otherwise preserve everything exactly
+            if (val === undefined || val === null) val = "";
+            // Always quote, and double embedded quotes for valid CSV
+            return '"' + String(val).replace(/"/g, '""') + '"';
+        }).join(",");
+        csvLines.push(row);
+    });
+
+    var csvContent = csvLines.join("\n");
+    try {
+        var Files = Java.type("java.nio.file.Files");
+        var Paths = Java.type("java.nio.file.Paths");
+        var outputPath = Paths.get(outputFilePath);
+        var parentDir = outputPath.getParent();
+        if (!Files.exists(parentDir)) {
+            log(`[INFO] Creating missing output directory: ${parentDir.toString()}`);
+            Files.createDirectories(parentDir);
+        }
+        Files.write(outputPath, csvContent.getBytes("UTF-8"));
+        log(`[INFO] writeDomainNameObjArrayToCSV: Successfully wrote ${objArray.length} rows to '${outputFilePath}'`);
+    } catch (e) {
+        error("[ERROR] writeDomainNameObjArrayToCSV: Failed to write file. " + (e.message || e));
+    }
+}
+
+/**
+ * Finds or creates a taxonomy folder under the HeatMap subfolder of a root folder.
+ * Uses normalized taxonomy name for folder creation and logs each operation.
+ *
+ * @param {object} rootFolder - The correct root folder object
+ * @param {string} taxonomyValue - The domain/taxonomy string (un-normalized)
+ * @returns {object} Folder object for taxonomy
+ */
+function getOrCreateTaxonomyFolder(rootFolder, taxonomyValue) {
+    if (!rootFolder) {
+        error("[ERROR] getOrCreateTaxonomyFolder: rootFolder is undefined.");
+        return null;
+    }
+    var normalizedDomain = normalizeFolderName(taxonomyValue);
+    debug(`[DEBUG] [getOrCreateTaxonomyFolder] Normalized taxonomy/domain '${taxonomyValue}' to '${normalizedDomain}'`);
+
+    // Find or create "HeatMap" subfolder
+    var heatmapFolders = getSubfolders(rootFolder);
+    var heatmapFolder = heatmapFolders.find(f => f.name === "HeatMap");
+    if (!heatmapFolder) {
+        heatmapFolder = rootFolder.createFolder("HeatMap");
+        log(`[INFO] Created HeatMap folder under root: ${rootFolder.name}`);
+    } else {
+        debug(`[DEBUG] HeatMap folder already exists under root: ${rootFolder.name}`);
+    }
+
+    // Find or create taxonomy segment folder under HeatMap
+    var taxonomyFolders = getSubfolders(heatmapFolder);
+    var taxonomyFolder = taxonomyFolders.find(f => f.name === normalizedDomain);
+    if (!taxonomyFolder) {
+        taxonomyFolder = heatmapFolder.createFolder(normalizedDomain);
+        log(`[INFO] Created taxonomy folder: '${normalizedDomain}' under HeatMap/${rootFolder.name}`);
+    } else {
+        debug(`[DEBUG] Taxonomy folder '${normalizedDomain}' already exists under HeatMap/${rootFolder.name}`);
+    }
+    return taxonomyFolder;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 0) Ensure HeatMap + taxonomy subfolder structure exists under each root folder
+// ─────────────────────────────────────────────────────────────────────────────
+function ensureHeatMapTaxonomyStructure(rootFolder, taxonomySegmentFolders) {
+    // Use robust subfolder retrieval
+    const currentSubfolders = getSubfolders(rootFolder);
+    debug(`[DEBUG] [${rootFolder.name}] Existing subfolders before: [${currentSubfolders.map(f=>f.name).join(", ")}]`);
+
+    // Find or create "HeatMap" subfolder
+    let heatmapFolder = currentSubfolders.find(f => f.name === "HeatMap");
+    if (!heatmapFolder) {
+        heatmapFolder = rootFolder.createFolder("HeatMap");
+        log(`[INFO] [${rootFolder.name}] Created "HeatMap" subfolder.`);
+    } else {
+        debug(`[DEBUG] [${rootFolder.name}] "HeatMap" subfolder already exists.`);
+    }
+
+    // Now repeat for taxonomy folders
+    const heatmapSubfolders = getSubfolders(heatmapFolder);
+    taxonomySegmentFolders.forEach(function(segmentFolder) {
+        let subFolder = heatmapSubfolders.find(f => f.name === segmentFolder);
+        if (!subFolder) {
+            heatmapFolder.createFolder(segmentFolder);
+            log(`[INFO] [${rootFolder.name}/HeatMap] Created taxonomy subfolder: "${segmentFolder}"`);
+        } else {
+            debug(`[DEBUG] [${rootFolder.name}/HeatMap] Taxonomy subfolder already exists: "${segmentFolder}"`);
+        }
+    });
+
+    // Log final state
+    const newSubfolders = getSubfolders(heatmapFolder);
+    debug(`[DEBUG] [${rootFolder.name}/HeatMap] Subfolders after: [${newSubfolders.map(f=>f.name).join(", ")}]`);
+}
+
+/**
+ * Create or update an ArchiMate element based on a pre-parsed CSV object.
+ *
+ * This function will:
+ *   1. Validate required fields (Name, Type).
+ *   2. Lookup an existing element by type & name, or create a new one.
+ *   3. Set its documentation and all custom properties.
+ *   4. Determine the appropriate folder (taxonomy under rootFolder, or rootFolder itself).
+ *   5. Move/add the element into that folder if not already present.
+ *   6. Return whether the element was "added" or "updated".
+ *
+ * Extensive log statements—tagged with [DEBUG], [INFO], [WARN], [ERROR]—
+ * record each step, with ISO-timestamp prefixes for easier tracing.
+ *
+ * @param {Object}           obj         One object from getDomainNameObjectArrayFromCSV(csv),
+ *                                       containing at minimum:
+ *                                         • obj.Name (string)   – element name
+ *                                         • obj.Type (string)   – normalized ArchiMate type (e.g. "application-service")
+ *                                         • obj.Description (string)
+ *                                         • obj.Domain (string) – taxonomy/folder key
+ *                                         • ...plus any additional fields per CONFIG.propertyNames
+ * @param {FolderProxy}      rootFolder  A JArchi FolderProxy under which taxonomy folders may be created.
+ * @returns {"added"|"updated"}          Indicates whether a new element was added or an existing one updated.
+ * @throws {Error}                       If validation fails or element creation cannot proceed.
+ *
+ * @example
+ *   try {
+ *     const result = createOrUpdateElementFromObj(obj, myRootFolder);
+ *     debug(`Element ${obj.Name} ${result}`);
+ *   }
+ *   catch(e) {
+ *     console.error(`Failed on element ${obj.Name}: ${e.message}`);
+ *   }
+ */
+function createOrUpdateElementFromObj(obj, rootFolder) {
+
+  log("INFO", `Begin createOrUpdate for '${obj && obj.Name}'`);
+
+  // 1) Basic validation
+  if (!obj || typeof obj !== "object") {
+    error("ERROR", `Invalid source object: ${JSON.stringify(obj)}`);
+    throw new Error("Invalid object parameter");
+  }
+  if (!rootFolder || rootFolder.type !== "folder") {
+    error("ERROR", `Invalid rootFolder: ${rootFolder}`);
+    throw new Error("Invalid rootFolder parameter");
+  }
+
+  const name        = String(obj.Name || "").trim();
+  const type        = String(obj.Type || "").trim();
+  const description = String(unescapeString(obj.Description) || "").trim();
+
+  if (!name) {
+    error("ERROR", `Missing Name in source object. Aborting.`);
+    throw new Error("Missing required Name");
+  }
+  if (!type) {
+    error("ERROR", `Missing Type for '${name}'. Aborting.`);
+    throw new Error("Missing required Type");
+  }
+
+  debug("DEBUG", `Validated inputs: name='${name}', type='${type}'`);
+
+  // 2) Find or create element
+  let elem, isUpdate;
+  try {
+    // a) filter returns a collection
+    const filtered = $("element")
+      .filter(e => e.type === type && e.name === name);
+
+    // b) size() ON THE COLLECTION
+    isUpdate = filtered.size() > 0;
+
+    if (isUpdate) {
+      // c) unwrap the first element from the collection
+      elem = filtered.get(0);
+      debug("DEBUG", `Found existing element '${name}' (${type}), will update`);
+    }
+    else {
+      elem = model.createElement(type, name);
+      debug("DEBUG", `Created new element '${name}' (${type})`);
+    }
+
+    if (!elem) {
+      throw new Error("model.createElement returned null");
+    }
+  }
+  catch(e) {
+    error("ERROR", `Error finding/creating element '${name}': ${e.message}`);
+    throw e;
+  }
+
+  // 3) Set documentation
+  try {
+    elem.documentation = description;
+    debug("DEBUG", `Documentation set for '${name}': '${description}'`);
+  }
+  catch(e) {
+    warn("WARN", `Failed to set documentation on '${name}': ${e.message}`);
+  }
+
+  // 4) Set custom properties from obj
+  Object.keys(CONFIG.propertyNames).forEach(key => {
+    const skip = ["name","abb","type","description"]
+      .includes(key.toLowerCase());
+    if (skip) return;
+
+    const propKey = CONFIG.propertyNames[key];
+    const val     = obj[propKey] != null ? obj[propKey] : "";
+
+    try {
+      elem.prop(propKey, val, true);
+      debug("DEBUG", `Property '${propKey}'='${val}' on '${name}'`);
+    }
+    catch(e) {
+      warn("WARN", `Failed to set prop '${propKey}' on '${name}': ${e.message}`);
+    }
+  });
+
+  // 5) Determine folder (taxonomy or root)
+  const taxKey       = String(obj.Domain || "").trim();
+  let   targetFolder = rootFolder;
+  if (taxKey) {
+    try {
+      targetFolder = getOrCreateTaxonomyFolder(rootFolder, taxKey);
+      log("INFO", `Using taxonomy folder '${taxKey}' under '${rootFolder.name}'`);
+    }
+    catch(e) {
+      warn("WARN", `Could not create/find taxonomy folder '${taxKey}': ${e.message}`);
+      targetFolder = rootFolder;
+    }
+  }
+  else {
+    warn("WARN", `No Domain for '${name}', using root folder '${rootFolder.name}'`);
+  }
+
+  // 6) Add/move element into targetFolder if needed
+  try {
+    const alreadyInFolder = $(targetFolder)
+      .find("element")
+      .filter(e => e.id === elem.id)
+      .size() > 0;
+
+    if (!alreadyInFolder) {
+      targetFolder.add(elem);
+      debug("DEBUG", `${isUpdate ? "Moved" : "Added"} '${name}' to folder '${targetFolder.name}'`);
+    }
+    else {
+      debug("DEBUG", `'${name}' already in '${targetFolder.name}', skipping move`);
+    }
+  }
+  catch(e) {
+    error("ERROR", `Failed to assign '${name}' to folder '${targetFolder.name}': ${e.message}`);
+  }
+
+  log("INFO", `Finished createOrUpdate for '${name}' → ${isUpdate ? "updated" : "added"}`);
+  return isUpdate ? "updated" : "added";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1) CREATE OR REUSE VIEWS (idempotent)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * For each unique domain in objs, find an existing ArchiMate view named
+ * "<Domain> <viewSuffix>". If it exists, reuse it; otherwise create a new one.
+ *
+ * @param {Object[]} objs          Array of CSV-derived objects (must have .Domain)
+ * @param {string}   viewSuffix    Suffix to append to each view name (e.g. "Heatmap")
+ * @returns {Object.<string,DiagramModelProxy>}  Map of domain→view proxy
+ */
+function createViewsForDomains(objs, viewSuffix) {
+  // Deduplicate domains, using "[root]" for empty
+  const domains = [...new Set(
+    objs.map(o => (o.Domain || "").trim() || "[root]")
+  )];
+
+  log(`Ensuring ${domains.length} view(s) exist for domains: ${domains.join(", ")}`);
+
+  const viewMap = {};
+
+  domains.forEach(domain => {
+    const safeDomain = domain.replace(/["<>\\\/:|?*]/g, "").trim();
+    const viewName   = `${safeDomain} ${viewSuffix}`;
+
+    // 1.1) Attempt to find existing view by name
+    const existingColl = $("archimate-diagram-model")
+      .filter(v => v.name === viewName);
+
+    if (existingColl.size() > 0) {
+      // Reuse first match
+      const view = existingColl.get(0);
+      viewMap[domain] = view;
+      log(`Re-using existing view '${viewName}' for domain '${domain}'`);
+    }
+    else {
+      // Create new view
+      try {
+        const view = model.createArchimateView(viewName);
+        if (!view) throw new Error("model.createArchimateView returned null");
+
+        viewMap[domain] = view;
+        log(`Created new view '${viewName}' for domain '${domain}'`);
+      }
+      catch (e) {
+        error(`Failed to create view '${viewName}': ${e.message}`);
+      }
+    }
+  });
+
+  return viewMap;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2) MAP ELEMENTS TO VIEWS (idempotent)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Idempotently map each model element into its domain’s view:
+ *   - Scans all diagram objects on the view via view.find()
+ *   - Filters by concept.id to detect existing visuals
+ *   - Only calls view.add(...) when none are found
+ *   - Optionally invokes updateDiagramObject on the existing proxy
+ *
+ * @param {Object[]}                         objs
+ *   Array of CSV-parsed objects (each with .Type, .Name, .Domain)
+ * @param {Object.<string,DiagramModelProxy>} viewMap
+ *   Map from domain string → ArchiMate View proxy
+ * @param {function(DiagramModelObjectProxy,ArchimateElementProxy):void}
+ *   [updateDiagramObject] Optional callback for existing visuals
+ */
+function mapElementsToViews(objs, viewMap, updateDiagramObject) {
+  log(`Mapping ${objs.length} element(s) into views (idempotent)`);
+
+  objs.forEach((o, idx) => {
+    const row = idx + 2;
+    const domain = (o.Domain||"").trim() || "[root]";
+    const view   = viewMap[domain];
+
+    if (!view) {
+      warn(`Row ${row}: no view for domain '${domain}', skipping '${o.Name}'`);
+      return;
+    }
+
+    // find all model elements by type & name
+    const elems = $("element")
+      .filter(e => e.type === o.Type && e.name === o.Name);
+
+    if (elems.size() === 0) {
+      error(`Row ${row}: element '${o.Name}' (${o.Type}) not found in model`);
+      return;
+    }
+
+    elems.each(el => {
+      try {
+        // scan *all* diagram objects in this view, then filter by concept.id
+        const existing = $(view)
+          .find()                                         // all visual objects :contentReference[oaicite:6]{index=6}
+          .filter(vo => vo.concept && vo.concept.id === el.id);
+
+        if (existing.size() > 0) {
+          log(`Row ${row}: '${el.name}' already in view '${view.name}', skipping`);
+          if (typeof updateDiagramObject === "function") {
+            updateDiagramObject(existing.first(), el);
+          }
+        }
+        else {
+          view.add(el, 0, 0, -1, -1);
+          debug(`Row ${row}: added '${el.name}' to view '${view.name}'`);
+        }
+      }
+      catch (e) {
+        error(`Row ${row}: failed mapping '${o.Name}' → '${view.name}': ${e.message}`);
+      }
+    });
+  });
+}
+
+/**
+ * Auto‐arrange only the genuine visual objects in a view into a neat grid.
+ * Skips anything that doesn’t expose .bounds (e.g. references or non‐visual nodes).
+ *
+ * @param {DiagramModelProxy} view     The ArchiMate view to layout.
+ * @param {number}            [cellW=200]  Horizontal spacing between items.
+ * @param {number}            [cellH=150]  Vertical spacing between items.
+ */
+function autoArrangeViewGrid(view, cellW = 200, cellH = 150) {
+  // 1) Get all immediate diagram‐object children that have a .bounds proxy
+  const allChildren = $(view).children();
+  const visuals = allChildren.filter(obj => typeof obj.bounds === 'object');
+
+  const total = visuals.size();
+  if (total === 0) {
+    debug(`autoArrangeViewGrid: no visual objects to arrange in '${view.name}'`);
+    return;
+  }
+
+  // 2) Compute a “square” grid
+  const cols = Math.ceil(Math.sqrt(total));
+  log(`Auto‐arranging ${total} visuals in view '${view.name}' as ${cols}×${Math.ceil(total/cols)}`);
+
+  // 3) Position each one
+  visuals.each((diagObj, idx) => {
+    // diagObj is a DiagramModelObjectProxy with a .bounds
+    const row = Math.floor(idx / cols);
+    const col = idx % cols;
+
+    // Set new X/Y. Width/height remain unchanged.
+    diagObj.bounds.x = col * cellW;
+    diagObj.bounds.y = row * cellH;
+
+    debug(`  • '${diagObj.concept ? diagObj.concept.name : diagObj.name}' → (${diagObj.bounds.x},${diagObj.bounds.y})`);
+  });
+}
+
+(function main() {
+    "use strict";
+    console.clear();
+    console.show();
+    try {
+        debug("[DEBUG] Starting CSV import (robust folder handling)");
+
+        var model = getActiveModel();
+        var filePath = promptForFile(CONFIG.heatmapCSVselectPromptTitle, CONFIG.csvFilter,  window.promptOpenFile);
+        if (!filePath) return;
+        debug("[DEBUG] Selected file: " + filePath);
+
+        var csv = readCSV(filePath, CONFIG.csvDelimiter);
+        CONFIG.requiredColumns.forEach(function(h) {
+            if (csv.headers.indexOf(h) < 0) throw new Error('Missing required column: "' + h + '"');
+        });
+        debug("[DEBUG] CSV columns validated.");
+
+        // Read the source csv and create an output csv with filtered and cleaned data.
+        if (CONFIG.createCSV) {
+        
+            var domainNameObjArray = getDomainNameObjectArrayFromCSV(csv);
+            
+            // Example:
+            var outputPath = CONFIG.outcsvPath; // Must be absolute path
+            writeDomainNameObjArrayToCSV(domainNameObjArray, outputPath);
+
+        } // enf of if CONFIG.createCSV
+
+        // Setup: Map root folders by name for fast lookup
+        const conceptTypeToRootFolder = {
+            "resource": "Strategy",
+            "capability": "Strategy",
+            "business-process": "Business",
+            "application-function": "Application",
+            "application-service": "Application",
+            "node": "Technology & Physical",
+            "communication-network": "Technology & Physical",
+            "grouping": "Other"
+        };
+
+        if (CONFIG.createFolders) {
+
+            // Create HeatMap and Taxonomy folders, if they don't exist
+            const taxonomySegmentFolders = CONFIG.taxonomySegments.map(normalizeFolderName);
+            debug("Taxonomy segment folders: "+taxonomySegmentFolders.join(", "));
+            var { array: rootFoldersArr, map: rootFoldersByName } = getRootFolders(model);  // getRootFolders() uses jArchi idiom
+
+            debug("[DEBUG] Starting HeatMap taxonomy folder creation loop...");
+            debug("[DEBUG] Model root folders detected:");
+            Object.keys(rootFoldersByName).forEach(function(name) {
+                debug(" - " + name);
+            });
+
+            let processedFolders = 0;
+
+            Object.values(conceptTypeToRootFolder).forEach(function(rootFolderName) {
+                debug(`[DEBUG] Processing mapped root folder: "${rootFolderName}"`);
+                const rootFolder = rootFoldersByName[rootFolderName];
+                if (!rootFolder) {
+                    console.error(`[ERROR] Root folder "${rootFolderName}" not found in model!`);
+                    return;
+                }
+                processedFolders++;
+                log(`[INFO] Found root folder: "${rootFolderName}". Ensuring HeatMap and taxonomy folders exist...`);
+                ensureHeatMapTaxonomyStructure(rootFolder, taxonomySegmentFolders);
+            });
+
+            if (processedFolders === 0) {
+                console.error("[FATAL] No valid root folders processed! Check your 'conceptTypeToRootFolder' mapping and the actual model folders.");
+            } else {
+                log(`[INFO] Folder creation process complete. ${processedFolders} root folders processed.`);
+            }
+        } // end of if (CONFIG.createFolders)
+
+        if (CONFIG.createElements) {
+            debug("[DEBUG] Starting HeatMap element creation loop...");
+
+            let stats = { added: 0, updated: 0, skipped: 0, failed: 0 };
+            var domainNameObjArray = getDomainNameObjectArrayFromCSV(csv);
+
+            domainNameObjArray.forEach(function(obj, idx) {
+                // 1) Validate required fields
+                if (!obj.Name || !obj.Domain) {
+                    stats.failed++;
+                    error(`Row ${idx + 2} error: Missing Name or Domain. Skipping row.`);
+                    return;  // skip to next obj
+                }
+                if (!obj.Type || !conceptTypeToRootFolder[obj.Type]) {
+                    stats.failed++;
+                    error(`Row ${idx + 2} error: type '${obj.Type}' is missing or not mapped. Skipping row.`);
+                    return;
+                }
+
+                // 2) Now that obj is valid, find its root folder
+                var rootFolderName = conceptTypeToRootFolder[obj.Type];
+                var rootFolder     = rootFoldersByName[rootFolderName];
+                if (!rootFolder) {
+                    stats.failed++;
+                    error(
+                    `Row ${idx + 2} error: root folder not found for type '${obj.Type}' ` +
+                    `(expected root: '${rootFolderName}')`
+                    );
+                    return;
+                }
+
+                // 3) Create or update the element
+                try {
+                    // NOTE: pass `obj` (or restructure createOrUpdateElementFromObj to accept `obj`)
+                    var which = createOrUpdateElementFromObj(obj, rootFolder);
+                    stats[which]++;      // which should be "added" or "updated"
+                }
+                catch (e) {
+                    stats.failed++;
+                    error(`Row ${idx + 2} error: ${(e.message||e)}`);
+                }
+            });
+
+            // 4) Final summary
+            log(
+            `Import complete. Added: ${stats.added}, Updated: ${stats.updated}, ` +
+            `Skipped: ${stats.skipped}, Failed: ${stats.failed}`
+            );
+            // window.alert(
+            // `Import complete. Added: ${stats.added}, Updated: ${stats.updated}, ` +
+            // `Skipped: ${stats.skipped}, Failed: ${stats.failed}`
+            // );
+        } // end of if (CONFIG.createElements)
+
+        
+        //Create views and map elements to views
+        if (CONFIG.createViews) {
+        try {
+            log("Starting view-creation phase…");
+            // domainNameObjArray comes from your earlier CSV parsing and element creation
+            const viewMap = createViewsForDomains(domainNameObjArray, CONFIG.viewSuffix);
+            mapElementsToViews(domainNameObjArray, viewMap);
+            function updateDiagramObject(diagObj, element) {
+                // e.g. move existing shapes into a grid cell
+                // diagObj.bounds.x = /* your logic */;
+                // diagObj.bounds.y = /* your logic */;
+                // // or apply a style, color, font, etc.
+            }
+            log("View-creation complete.");
+            //viewMap is your domain→DiagramModelProxy map:
+            // stagger the elements in the view
+            Object.values(viewMap).forEach(view => {
+                autoArrangeViewGrid(view, 250, 180);
+                });
+            window.alert(`Views created: ${Object.keys(viewMap).length}`);
+            }
+        catch(e) {
+            error(`Fatal during view creation: ${e.message}`);
+            window.alert(`Error creating views: ${e.message}`);
+            }
+        }
+    } catch (e) {
+        error("Fatal error: " + (e.message || e));
+        window.alert("Fatal error: " + (e.message || e));
+    }
+})();
+

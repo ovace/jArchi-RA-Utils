@@ -1,0 +1,293 @@
+/*
+ * Heatmap-Sync Enhanced (Modularized, Fully Documented, with Header Fallback,
+ * Progress Reporting, Grouping Extraction, View-Membership, and Blank-Row Filtering)
+ * Heatmap-Sync Enhanced (Modularized, Fully Documented, with View-Membership and Robust CSV Helpers)
+ */
+
+(function() {
+  // Initialize console
+  console.clear();
+  console.show();
+
+  // Load shared libraries
+  const libPath = __DIR__ + 'lib\\';
+  const utils  = require(libPath + 'common_utils.ajs');
+  const logger = require(libPath + 'logger.ajs');
+  const XLSX   = require(libPath + 'xlsx.full.min.js');
+
+  const { 
+    buildCsvLine,   
+    buildHeader,
+    collectColumnValues,
+    collectPropValues,
+    createSubfolderUnderParent,
+    escapeFolderName,
+    escapeString,
+    findFolderByName_selector,
+    findFoldersByName_filter,
+    findSubFolderByName,
+    findSubfoldersUnderParent,
+    findSubfoldersUnderParentObject,
+    formatForCSV,
+    getActiveModel,
+    getElementViews,
+    getImmediateChildFolders,
+    getOrCreateSubfolder,
+    getRootFolders,
+    getRowValue,
+    getSubfolders,
+    loadSheetJS,
+    normalize,
+    normalizeFolderName,
+    promptForFile,
+    readCSV,
+    readFileBase64,
+    toJsArray,    
+    unescapeString,
+    validateColumns,
+    writeCsv,
+  } = utils;
+
+  const { log, 
+          debug, 
+          warn, 
+          error 
+        } = logger;
+
+  // Configuration  
+
+  /** @typedef {{
+   *    sheetName: string,
+   *    excelFilters: Array<Object>,
+   *    csvFilters: Array<Object>,
+   *    sheetjsPath: string,
+   *    requiredColumns: string[],
+   *    baseOutputCols: string[],
+   *    flagCols: string[],
+   *    extraCols: string[],
+   *    relationshipTypes: string[],
+   *    levelMap: Object<string,{col:string}>,
+   *    debug: boolean
+   * }} Config
+   */
+  const config = {
+    debug: false,
+    sheetjsPath:  __DIR__ + '/lib/xlsx.full.min.js',
+    
+    heatMapFilePromptTitle: 'Select Heatmap Excel Workbook',
+    excelFilters: [{ name: 'Excel Workbook', extensions: ['xlsm','xlsx'] }],
+    sheetName: 'Function-HeatMap-Final',
+
+    csvFilePromptTitle:   'Select Heatmap CSV File',
+    csvFilters:   [{ name: 'CSV File',      extensions: ['csv'] }],
+    
+    requiredColumns: ['_id','ABB Name','Functional composition','Description','Pri Domain'],
+    baseOutputCols:  ['_id','ABB Name','Functional composition','Description','Pri Domain'],
+    flagCols:        ['Taxonomy Classification','Level','nameMatch','descMatch','modelOnly'],
+    extraCols:       ['ID','Type','Grouped_under','inView'],
+    relationshipTypes: [
+      'association-relationship',
+      'aggregation-relationship',
+      'composition-relationship'
+    ],
+    levelMap: {
+      '0': { col: 'ABB Name' },
+      '1': { col: 'ABB Name' },
+      '2': { col: 'Functional composition' }
+    },    
+    // CSV Options
+    delimiter: ',',
+    newline: '\n',
+    escapeFormulae: true  
+  };
+
+  const relTypeIds = config.relationshipTypes;
+  
+  /**
+   * Determine grouping for an element via configured relationship types.
+   * @param {Object} element – Archi element proxy
+   * @param {string[]} relTypes
+   * @returns {string} grouping name, relationship type, or ''
+   */
+  function getGrouping(element, relTypes) {
+    if (config.debug) debug('[DEBUG] getGrouping() for ' + element.id + '/' + element.name);
+    for (let type of relTypes) {
+      const ofType   = $('relationship').filter(r => r.type.toLowerCase() === type).toArray();
+      const relevant = ofType.filter(r => r.source.id === element.id || r.target.id === element.id);
+      if (config.debug) debug('[DEBUG] - type=' + type + ', total=' + ofType.length + ', relevant=' + relevant.length);
+      if (relevant.length) {
+        for (let r of relevant) {
+          const other = (r.source.id === element.id ? r.target : r.source);
+          if (other.type.toLowerCase() === 'grouping') {
+            if (config.debug) debug('[DEBUG] - grouping found: ' + other.name);
+            return other.name;
+          }
+        }
+        if (config.debug) debug('[DEBUG] - no grouping element; return type ' + type);
+        return type;
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Process sheet rows into CSV, computing matches and view-membership.
+   */
+  function processSpreadsheetRows(rows, colIdxFn, matchedIds, propKeys) {
+    const dataRows = rows.slice(2).map((r,i) => ({ row:r, sheetRow:i+2 }));
+    log('Processing ' + dataRows.length + ' spreadsheet rows...');
+
+    let frag = buildHeader(propKeys) + '\n';
+
+    dataRows.forEach((entry, idx) => {
+      log(' [' + (idx+1) + '/' + dataRows.length + '] Sheet row ' + entry.sheetRow);
+
+      const fc = normalize(entry.row[colIdxFn('Functional composition')]||'');
+      const el = $('element').filter(e => normalize(e.name) === fc).first();
+
+      // Prepare a merged record
+      const rec = {};
+      // Base columns
+      config.baseOutputCols.forEach(col => {
+        rec[col] = entry.row[colIdxFn(col)] || '';
+      });
+      // Flags
+      let nameMatch = '0', descMatch = '0', modelOnlyFlag = '0';
+      if (el) {
+        nameMatch = '1';
+        // el.prop('nameMatch','1',true); // add the property to the element in the model // to-do only if it does not already exist else update value
+        const docNorm = normalize(el.documentation || '');
+        const descNorm = normalize(entry.row[colIdxFn('Description')] || '');
+        if (docNorm === descNorm) {
+          descMatch = '1';
+          // el.prop('descMatch','1',true); // add the property to the element in the model // to-do only if it does not already exist else update value
+        }
+        // el.prop('modelOnly','0',true); // add the property to the element in the model // to-do only if it does not already exist else update value
+        matchedIds[el.id] = true;
+      }
+      rec['nameMatch'] = nameMatch;
+      rec['descMatch'] = descMatch;
+      rec['modelOnly'] = modelOnlyFlag;
+      rec['Taxonomy Classification'] = entry.row[colIdxFn('Taxonomy Classification')] || '';
+      rec['Level']                   = entry.row[colIdxFn('Level')] || '';
+
+      // Extra metadata
+      if (el) {
+        rec['ID']            = el.id;
+        rec['Taxonomy Classification'] = el.prop('Taxonomy Classification') || '';
+        rec['Level']                   = el.prop('Level') || '';
+        rec['Type']          = el.type;
+        rec['Grouped_under'] = getGrouping(el, relTypeIds);
+        rec['inView']        = getElementViews(el);
+      } else {
+        rec['ID']            = '';
+        rec['Type']          = '';
+        rec['Grouped_under'] = '';
+        rec['inView']        = 'Orphan';
+      }
+
+      frag += buildCsvLine(rec, propKeys) + '\n';
+    });
+
+    return frag;
+  }
+
+  /**
+   * Process model-only elements (not matched in spreadsheet).
+   */  
+  function processModelOnly(matchedIds, propKeys) {
+    log('Processing model-only elements...');
+    let frag = '';
+    let count = 0;
+
+    toJsArray($('element').toArray())
+      .filter(e => !matchedIds[e.id])
+      .forEach((el, idx) => {
+        count++;
+        log(' [' + count + '] Model-only element ' + el.id);
+
+        // 1) Determine level & lookup target column
+        const lvl        = el.prop('Level') || '0';
+        const mapEntry   = config.levelMap[lvl] || config.levelMap['0'];
+        const targetCol  = mapEntry.col;       // either 'ABB Name' or 'Functional composition'
+
+        // 2) Collect any dynamic props you need (unchanged)
+        const dynVals = collectPropValues(el, propKeys);
+
+        // 3) Build the record, with both name-columns empty by default
+        const rec = {
+          _id:                         '',
+          'ABB Name':                  '',         // ← will get filled below if targetCol matches
+          'Functional composition':    '',         // ← likewise
+          'Description':               el.documentation || '',
+          'Pri Domain':                '',
+          'Taxonomy Classification':   el.prop('Taxonomy Classification') || '',
+          'Level':                     lvl,
+          'nameMatch':                 '0',
+          'descMatch':                 '0',
+          'modelOnly':                 '1',
+          'ID':                        el.id,
+          'Type':                      el.type,
+          'Grouped_under':             getGrouping(el, relTypeIds),
+          'inView':                    getElementViews(el)
+        };
+        // Add any dynamic props you need
+        Object.keys(dynVals).forEach(key => {
+          rec[key] = dynVals[key];
+        });    
+
+        // 4) Place the element name into the correct column
+        rec[targetCol] = el.name;
+
+        // 5) Append CSV line (buildCsvLine will respect the order implied by propKeys)
+        frag += buildCsvLine(rec, propKeys) + '\n';
+      });
+
+    return frag;
+  }
+
+  /** Main entry point */
+  function main() {
+    try {
+      log('Starting Heatmap-Sync execution...');
+
+      const excelPath = promptForFile(config.excelFilePromptTitle, config.excelFilters,  window.promptOpenFile);
+      if (!excelPath) return;
+      const csvPath   = promptForFile(config.csvFilePromptTitle, config.csvFilters,   window.promptSaveFile);
+      if (!csvPath)   return;
+
+      if (config.debug) debug('[DEBUG] Loading SheetJS from: ' + config.sheetjsPath);
+      // const XLSX   = loadSheetJS(config.sheetjsPath);
+      const wb     = XLSX.read(readFileBase64(excelPath), { type:'base64' });
+      const sheet  = wb.Sheets[config.sheetName];
+      if (!sheet) throw new Error('Sheet "' + config.sheetName + '" not found');
+      const rows   = XLSX.utils.sheet_to_json(sheet, { header:1, raw:false });
+
+      // Map headers
+      const headersRow = rows[1].map(h => h.toString().trim());
+      const colIdx = c => headersRow.indexOf(c);
+      validateColumns(colIdx, config.requiredColumns);
+
+      // Build full list of CSV columns (including inView at end)
+      const propKeys = config.baseOutputCols
+        .concat(config.flagCols, config.extraCols);
+
+      // Build CSV content
+      let csv = '';
+      csv += processSpreadsheetRows(rows, colIdx, {}, propKeys);
+      csv += processModelOnly({}, propKeys);
+
+      // Write out final CSV
+      writeCsv(csv, csvPath);
+
+      log('Heatmap-Sync execution completed.');
+      window.alert('Export complete: ' + csvPath);
+    }
+    catch (err) {
+      error('Error: ' + err);
+      window.alert('Script failed: ' + err.message);
+    }
+  }
+  log('Heatmap-Sync script started.');
+  main();
+})();
