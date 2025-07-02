@@ -20,7 +20,8 @@
   const logger = require(libPath + 'logger.ajs');
 
   const { readCSV,
-          getActiveModel,          
+          getActiveModel,   
+          escapeString,       
           unescapeString,          
           normalizeFolderName,
           getRootFolders,
@@ -56,6 +57,7 @@ var CONFIG = {
     csvFilter:[{name:"CSV Files",extensions:["csv"]}],
     csvDelimiter: ",",
     headerMap: {
+        "hm_uuid": "uid",
         "_id": "_id",
         "ABB Name": "ABB Name",
         "Function Name": "Functional composition",
@@ -69,17 +71,26 @@ var CONFIG = {
         "ID": "ID",
         "Type": "Type",
         "Grouped Under": "Grouped_under",
-        "inView": "inView"
+        "inView": "inView",
+        "Version": "Version",
+        "Owner": "Owner",
+        "Name": "Name",
+        "StandardSolutionExample": "StandardSolutionExample",
+        "ExampleUse": "ExampleUse"
     },        
-    headerRowIndex: 0,
+    headerRowIndex: 0, // first row -- start from 0
     requiredColumns: ["ABB Name", "Functional composition", "Description", "Pri Domain",
                       "Taxonomy Classification", "Level", "Type",
-                      "Grouped_under", "inView"],
+                      "Version", "Owner", "Name", "StandardSolutionExample", 
+                      "ExampleUse"
+              ],
     propertyNames: {
-        name: "Functional composition", abb: "ABB Name", type: "Type",
+        hmuuid: "uid", name: "Functional composition", abb: "ABB Name", type: "Type",
         description: "Description", taxonomy: "Taxonomy Classification",
         level: "Level", modelOnly: "modelOnly", grouped: "Grouped_under",
-        inView: "inView", domain: "Pri Domain", id: "_id"
+        inView: "inView", domain: "Pri Domain", id: "_id", version: "Version", 
+        owner: "Owner", name: "Name", standardSolutionExample: "StandardSolutionExample", 
+        exampleUse: "ExampleUse"
     },
     defaultType: "resource",
     taxonomy: {
@@ -102,6 +113,7 @@ var CONFIG = {
         "Telemetry"
     ],
     outputCSVheaders: [
+        "hm_uuid",
         "id",
         "key", 
         "Name", 
@@ -111,7 +123,12 @@ var CONFIG = {
         "Level", 
         "ID", 
         "groupedUnder", 
-        "inView"
+        "inView", 
+        "Version", 
+        "Owner", 
+        "Name", 
+        "StandardSolutionExample", 
+        "ExampleUse"
     ],
     escapeMap: {
         "#comma#": ",",
