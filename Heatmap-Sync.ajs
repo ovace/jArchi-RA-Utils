@@ -16,8 +16,10 @@
   const XLSX   = require(libPath + 'xlsx.full.min.js');
 
   const { 
+    assignRowUUIDs,
     buildCsvLine,   
     buildHeader,
+    buildProperties,
     collectColumnValues,
     collectPropValues,
     createSubfolderUnderParent,
@@ -90,6 +92,40 @@
       'aggregation-relationship',
       'composition-relationship'
     ],
+    modelProperties: [
+      'Level',
+      'Taxonomy Classification',
+      'Version',
+      'Owner',
+      'Name',
+      'StandardSolutionExample',
+      'ExampleUse',
+      'Type',
+    ],
+    uuidCols: [
+      'Pri Domain',
+      'Functional composition',
+      'ABB Name'      
+    ],
+    /**
+     * supplementProperties: List of computed or derived properties for export/metadata.
+     * Each entry provides a key (column name) and a function taking (el, ctx).
+     */
+    supplementProperties : [
+        {
+            key: "ID",
+            fn: function(el) { return el && el.id ? el.id : ""; }
+        },
+        {
+            key: "Grouped_under",
+            fn: function(el, ctx) { return el ? ctx.getGrouping(el, ctx.relTypeIds) : ""; }
+        },
+        {
+            key: "inView",
+            fn: function(el, ctx) { return el ? ctx.getElementViews(el) : "Orphan"; }
+        }
+        // Add further computed fields here as needed
+    ],
     levelMap: {
       '0': { col: 'ABB Name' },
       '1': { col: 'ABB Name' },
@@ -131,120 +167,150 @@
   }
 
   /**
-   * Process sheet rows into CSV, computing matches and view-membership.
-   */
+ * Process sheet rows into CSV, including all modelProperties and supplementProperties for matched elements.
+ * Uses buildProperties() for model element data injection.
+ */
   function processSpreadsheetRows(rows, colIdxFn, matchedIds, propKeys) {
-    const dataRows = rows.slice(2).map((r,i) => ({ row:r, sheetRow:i+2 }));
-    log('Processing ' + dataRows.length + ' spreadsheet rows...');
+      const dataRows = rows.slice(2).map((r, i) => ({ row: r, sheetRow: i + 2 }));
+      log('Processing ' + dataRows.length + ' spreadsheet rows...');
 
-    let frag = buildHeader(propKeys) + '\n';
+      let frag = buildHeader(propKeys) + '\n';
 
-    dataRows.forEach((entry, idx) => {
-      log(' [' + (idx+1) + '/' + dataRows.length + '] Sheet row ' + entry.sheetRow);
+      const ctx = {
+          getGrouping: getGrouping,
+          getElementViews: getElementViews,
+          relTypeIds: relTypeIds
+      };
 
-      const fc = normalize(entry.row[colIdxFn('Functional composition')]||'');
-      const el = $('element').filter(e => normalize(e.name) === fc).first();
+      dataRows.forEach((entry, idx) => {
+          log(' [' + (idx + 1) + '/' + dataRows.length + '] Sheet row ' + entry.sheetRow);
 
-      // Prepare a merged record
-      const rec = {};
-      // Base columns
-      config.baseOutputCols.forEach(col => {
-        rec[col] = entry.row[colIdxFn(col)] || '';
+          const fc = normalize(entry.row[colIdxFn('Functional composition')] || '');
+          const el = $('element').filter(e => normalize(e.name) === fc).first();
+
+          // Prepare a merged record, initialize all columns as empty string
+          let rec = {};
+          propKeys.forEach(col => { rec[col] = ''; });
+
+          // 1. Base columns: spreadsheet always takes precedence for these
+          config.baseOutputCols.forEach(col => {
+              rec[col] = entry.row[colIdxFn(col)] || '';
+          });
+
+          // 2. Matching logic/flags
+          let nameMatch = '0', descMatch = '0', modelOnlyFlag = '0';
+          if (el) {
+              nameMatch = '1';
+              const docNorm = normalize(el.documentation || '');
+              const descNorm = normalize(entry.row[colIdxFn('Description')] || '');
+              if (docNorm === descNorm) descMatch = '1';
+              matchedIds[el.id] = true;
+          }
+          rec['nameMatch'] = nameMatch;
+          rec['descMatch'] = descMatch;
+          rec['modelOnly'] = modelOnlyFlag;
+
+          // 3. If model element is found, inject modelProperties & supplementProperties
+          if (el) {
+              // Use buildProperties for all element-related fields
+              const modelRec = buildProperties(
+                  el,
+                  config.modelProperties,
+                  config.supplementProperties,
+                  ctx
+              );
+              // Assign every property from modelRec to rec, as long as it's in propKeys
+              Object.keys(modelRec).forEach(key => {
+                  if (propKeys.includes(key)) rec[key] = modelRec[key];
+              });
+          } else {
+              // For orphans: optional "Orphan" for inView, rest remain ''
+              config.supplementProperties.forEach(supp => {
+                  if (supp.key === 'inView') rec[supp.key] = 'Orphan';
+              });
+          }
+
+          // 4. Ensure spreadsheet values override any model properties for these columns:
+          if ('Taxonomy Classification' in rec) {
+              rec['Taxonomy Classification'] = entry.row[colIdxFn('Taxonomy Classification')] || rec['Taxonomy Classification'] || '';
+          }
+          if ('Level' in rec) {
+              rec['Level'] = entry.row[colIdxFn('Level')] || rec['Level'] || '';
+          }
+
+          // 5. Output row in final order (propKeys)
+          frag += buildCsvLine(rec, propKeys) + '\n';
       });
-      // Flags
-      let nameMatch = '0', descMatch = '0', modelOnlyFlag = '0';
-      if (el) {
-        nameMatch = '1';
-        // el.prop('nameMatch','1',true); // add the property to the element in the model // to-do only if it does not already exist else update value
-        const docNorm = normalize(el.documentation || '');
-        const descNorm = normalize(entry.row[colIdxFn('Description')] || '');
-        if (docNorm === descNorm) {
-          descMatch = '1';
-          // el.prop('descMatch','1',true); // add the property to the element in the model // to-do only if it does not already exist else update value
-        }
-        // el.prop('modelOnly','0',true); // add the property to the element in the model // to-do only if it does not already exist else update value
-        matchedIds[el.id] = true;
-      }
-      rec['nameMatch'] = nameMatch;
-      rec['descMatch'] = descMatch;
-      rec['modelOnly'] = modelOnlyFlag;
-      rec['Taxonomy Classification'] = entry.row[colIdxFn('Taxonomy Classification')] || '';
-      rec['Level']                   = entry.row[colIdxFn('Level')] || '';
 
-      // Extra metadata
-      if (el) {
-        rec['ID']            = el.id;
-        rec['Taxonomy Classification'] = el.prop('Taxonomy Classification') || '';
-        rec['Level']                   = el.prop('Level') || '';
-        rec['Type']          = el.type;
-        rec['Grouped_under'] = getGrouping(el, relTypeIds);
-        rec['inView']        = getElementViews(el);
-      } else {
-        rec['ID']            = '';
-        rec['Type']          = '';
-        rec['Grouped_under'] = '';
-        rec['inView']        = 'Orphan';
-      }
-
-      frag += buildCsvLine(rec, propKeys) + '\n';
-    });
-
-    return frag;
+      return frag;
   }
 
   /**
-   * Process model-only elements (not matched in spreadsheet).
-   */  
+ * Process model-only elements (not matched in spreadsheet).
+ * Uses buildProperties() to create the metadata/record object.
+ *
+ * @param {Object} matchedIds    - Hash of matched IDs from spreadsheet.
+ * @param {Array} propKeys       - CSV column order/keys for output.
+ * @returns {string} frag        - CSV fragment string.
+ */
   function processModelOnly(matchedIds, propKeys) {
-    log('Processing model-only elements...');
-    let frag = '';
-    let count = 0;
+      log('Processing model-only elements...');
+      let frag = '';
+      let count = 0;
+      const ctx = {
+          getGrouping: getGrouping,
+          getElementViews: getElementViews,
+          relTypeIds: relTypeIds
+      };
 
-    toJsArray($('element').toArray())
-      .filter(e => !matchedIds[e.id])
-      .forEach((el, idx) => {
-        count++;
-        log(' [' + count + '] Model-only element ' + el.id);
+      toJsArray($('element').toArray())
+          .filter(e => !matchedIds[e.id])
+          .forEach((el, idx) => {
+              count++;
+              log(' [' + count + '] Model-only element ' + el.id);
 
-        // 1) Determine level & lookup target column
-        const lvl        = el.prop('Level') || '0';
-        const mapEntry   = config.levelMap[lvl] || config.levelMap['0'];
-        const targetCol  = mapEntry.col;       // either 'ABB Name' or 'Functional composition'
+              // (your domain logic here)
+              const lvl = el.prop('Level') || '0';
+              const mapEntry = config.levelMap[lvl] || config.levelMap['0'];
+              const targetCol = mapEntry.col;
 
-        // 2) Collect any dynamic props you need (unchanged)
-        const dynVals = collectPropValues(el, propKeys);
+              const dynVals = collectPropValues(el, propKeys);
 
-        // 3) Build the record, with both name-columns empty by default
-        const rec = {
-          _id:                         '',
-          'ABB Name':                  '',         // ← will get filled below if targetCol matches
-          'Functional composition':    '',         // ← likewise
-          'Description':               el.documentation || '',
-          'Pri Domain':                '',
-          'Taxonomy Classification':   el.prop('Taxonomy Classification') || '',
-          'Level':                     lvl,
-          'nameMatch':                 '0',
-          'descMatch':                 '0',
-          'modelOnly':                 '1',
-          'ID':                        el.id,
-          'Type':                      el.type,
-          'Grouped_under':             getGrouping(el, relTypeIds),
-          'inView':                    getElementViews(el)
-        };
-        // Add any dynamic props you need
-        Object.keys(dynVals).forEach(key => {
-          rec[key] = dynVals[key];
-        });    
+              // Core record from buildProperties utility
+              let rec = buildProperties(
+                  el,
+                  config.modelProperties,
+                  config.supplementProperties,
+                  ctx
+              );
 
-        // 4) Place the element name into the correct column
-        rec[targetCol] = el.name;
+              // For columns present in propKeys but not set, fill as ''
+              propKeys.forEach(key => {
+                  if (!(key in rec)) rec[key] = '';
+              });
 
-        // 5) Append CSV line (buildCsvLine will respect the order implied by propKeys)
-        frag += buildCsvLine(rec, propKeys) + '\n';
-      });
+              // Place the name in the correct "name" column, clear others
+              if ('ABB Name' in rec) rec['ABB Name'] = '';
+              if ('Functional composition' in rec) rec['Functional composition'] = '';
+              rec[targetCol] = el.name;
 
-    return frag;
+              // Override/add known base/flag/extra fields as required
+              if ('Description' in rec)   rec['Description']   = el.documentation || '';
+              if ('nameMatch' in rec)     rec['nameMatch']     = '0';
+              if ('descMatch' in rec)     rec['descMatch']     = '0';
+              if ('modelOnly' in rec)     rec['modelOnly']     = '1';
+              if ('_id' in rec)           rec['_id']           = '';
+
+              // Add any dynamic values
+              Object.keys(dynVals).forEach(key => { rec[key] = dynVals[key]; });
+
+              // Output row in final, correct order
+              frag += buildCsvLine(rec, propKeys) + '\n';
+          });
+
+      return frag;
   }
+
 
   /** Main entry point */
   function main() {
@@ -268,14 +334,44 @@
       const colIdx = c => headersRow.indexOf(c);
       validateColumns(colIdx, config.requiredColumns);
 
-      // Build full list of CSV columns (including inView at end)
-      const propKeys = config.baseOutputCols
-        .concat(config.flagCols, config.extraCols);
+      // Build full list of CSV columns
+      // Start with explicit columns in your preferred order:
+      let propKeys = ['uid']
+        .concat(config.baseOutputCols)
+        .concat(config.flagCols)
+        .concat(config.extraCols);
 
-      // Build CSV content
+      // Add any new modelProperties (if not already present)
+      config.modelProperties.forEach(key => {
+        if (!propKeys.includes(key)) propKeys.push(key);
+      });
+
+      // Add any new supplementProperties keys (if not already present)
+      config.supplementProperties.forEach(s => {
+        if (!propKeys.includes(s.key)) propKeys.push(s.key);
+      });
+
+      // // Build CSV content
+      // let csv = '';
+      // csv += processSpreadsheetRows(rows, colIdx, {}, propKeys);
+      // csv += processModelOnly({}, propKeys);
+
+      // Build CSV row objects (instead of immediate string concat)
+      let allRows = [];
+
+      // Instead of direct string build, collect records
+      allRows = allRows.concat(processSpreadsheetRows(rows, colIdx, {}, propKeys, /*collectMode=*/true));
+      allRows = allRows.concat(processModelOnly({}, propKeys, /*collectMode=*/true));
+
+      // Assign UUIDs (fills 'uid' field in each row, using config.uuidCols for uniqueness)
+      assignRowUUIDs(allRows, config.uuidCols, 'uid');
+
+      // Now build the CSV string (header + rows)
       let csv = '';
-      csv += processSpreadsheetRows(rows, colIdx, {}, propKeys);
-      csv += processModelOnly({}, propKeys);
+      csv += buildHeader(propKeys) + '\n';
+      allRows.forEach(rec => {
+        csv += buildCsvLine(rec, propKeys) + '\n';
+      });
 
       // Write out final CSV
       writeCsv(csv, csvPath);
