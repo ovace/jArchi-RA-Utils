@@ -22,9 +22,11 @@
     buildProperties,
     collectColumnValues,
     collectPropValues,
+    conceptRelationshipMap,
     createSubfolderUnderParent,
     escapeFolderName,
     escapeString,
+    exportToExcel,
     findFolderByName_selector,
     findFoldersByName_filter,
     findSubFolderByName,
@@ -75,13 +77,14 @@
    */
   const config = {
     debug: false,
-    sheetjsPath:  __DIR__ + '/lib/xlsx.full.min.js',
+    getConceptDetails: false,
+    getRelarionshipMap: true,    
+
+    sheetjsPath:  __DIR__ + '/lib/xlsx.full.min.js',    
     
-    heatMapFilePromptTitle: 'Select Heatmap Excel Workbook',
     excelFilters: [{ name: 'Excel Workbook', extensions: ['xlsm','xlsx'] }],
     sheetName: 'Function-HeatMap-Final',
 
-    csvFilePromptTitle:   'Select Heatmap CSV File',
     csvFilters:   [{ name: 'CSV File',      extensions: ['csv'] }],
     
     requiredColumns: ['_id','ABB Name','Functional composition','Description','Pri Domain'],
@@ -304,64 +307,173 @@ function processModelOnly(matchedIds, propKeys) {
 }
 
 /** Main entry point */
+/**
+ * Main entry point for Heatmap-Sync.
+ * Loads and processes input Excel, writes CSV output, and (optionally) exports model relationship map to Excel.
+ */
 function main() {
     try {
-        log('Starting Heatmap-Sync execution...');
+        
+        var model = getActiveModel();
+        if (!model) {
+            log('No active model. Aborting.');
+            return;
+        }
 
-        const excelPath = promptForFile(config.excelFilePromptTitle, config.excelFilters, window.promptOpenFile);
-        if (!excelPath) return;
-        const csvPath = promptForFile(config.csvFilePromptTitle, config.csvFilters, window.promptSaveFile);
-        if (!csvPath) return;
+        if (config.debug) {
+            log('Diagnostic information...');
 
-        if (config.debug) debug('[DEBUG] Loading SheetJS from: ' + config.sheetjsPath);
-        const wb = XLSX.read(readFileBase64(excelPath), { type: 'base64' });
-        const sheet = wb.Sheets[config.sheetName];
-        if (!sheet) throw new Error('Sheet "' + config.sheetName + '" not found');
-        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false });
+            log('engineName :' +$.process.engine);
+            log('platform: ' + $.process.platform );
+            log('archi Name: ' + $.process.archiname );
+            log(' archi version : ' + $.process.release.archiVersion);
+            log(' jArchi name: ' + $.process.release.jArchiName);
+            log(' version : ' + $.process.release.jArchiVersion);
 
-        // Map headers
-        const headersRow = rows[1].map(h => h.toString().trim());
-        const colIdx = c => headersRow.indexOf(c);
-        validateColumns(colIdx, config.requiredColumns);
+            log('Active model: ' + model.name);
+            log('Element count: ' + $('element').size());
+            log('Relationship count: ' + $('relationship').size());
+            log('Property count: ' + $('property').size());
 
-        // Build full list of CSV columns
-        let propKeys = ['uid']
-            .concat(config.baseOutputCols)
-            .concat(config.flagCols)
-            .concat(config.extraCols);
+            // $('element').forEach(function(e) {
+            //     log('---------------------------------------------');
+            //     log('Element: ' + e.name + ' | type: ' + e.type + ' | id: ' + e.id);
 
-        config.modelProperties.forEach(key => {
-            if (!propKeys.includes(key)) propKeys.push(key);
-        });
+            //     // Outgoing relationships
+            //     var outRels = e.outRels();
+            //     log('Number of outRels: ' + outRels.length);
+            //     outRels.forEach(function(rel) {
+            //         var target = rel.target;
+            //         log('  Outgoing rel type: ' + rel.type +
+            //             ' → target element: ' +
+            //             (target ? (target.name + ' (' + target.type + ')') : '[no target]'));
+            //     });
 
-        config.supplementProperties.forEach(s => {
-            if (!propKeys.includes(s.key)) propKeys.push(s.key);
-        });
+            //     // Incoming relationships
+            //     var inRels = e.inRels();
+            //     log('Number of inRels: ' + inRels.length);
+            //     inRels.forEach(function(rel) {
+            //         var source = rel.source;
+            //         log('  Incoming rel type: ' + rel.type +
+            //             ' ← source element: ' +
+            //             (source ? (source.name + ' (' + source.type + ')') : '[no source]'));
+            //     });
+            // });
+            $('element').each(function(e) {
+                var outCount = 0;
+                $('relationship').each(function(rel) {
+                    if (rel.source && rel.source.id === e.id) {
+                        outCount++;
+                        // Gather info for source, relationship, target
+                        var sourceName = e.name || '';
+                        var sourceType = e.type || '';
+                        var sourceId   = e.id || '';
+                        var relType    = rel.type || '';
+                        var relId      = rel.id || '';
+                        var targetName = rel.target ? (rel.target.name || '') : '';
+                        var targetType = rel.target ? (rel.target.type || '') : '';
+                        var targetId   = rel.target ? (rel.target.id   || '') : '';
 
-        // Build record arrays
-        let matchedIds = {};
-        let allRows = [];
-        allRows = allRows.concat(processSpreadsheetRows(rows, colIdx, matchedIds, propKeys));
-        allRows = allRows.concat(processModelOnly(matchedIds, propKeys));
+                        log(
+                            'Source Name: ' + sourceName +
+                            ' | Source Type: ' + sourceType +
+                            ' | Source ID: ' + sourceId +
+                            ' | Relationship Type: ' + relType +
+                            ' | Relationship ID: ' + relId +
+                            ' | Target Name: ' + targetName +
+                            ' | Target Type: ' + targetType +
+                            ' | Target ID: ' + targetId
+                        );
+                    }
+                });
+                log('Element: ' + e.name + ' | Outgoing relationships: ' + outCount);
+            });
 
-        assignRowUUIDs(allRows, config.uuidCols, 'uid');
 
-        log('Exporting ' + allRows.length + ' rows...');
-        let csv = buildHeader(propKeys) + '\n';
-        allRows.forEach(rec => {
-            csv += buildCsvLine(rec, propKeys) + '\n';
-        });
 
-        writeCsv(csv, csvPath);
+        } // end debug
 
-        log('Heatmap-Sync execution completed.');
-        window.alert('Export complete: ' + csvPath);
+
+        // 0. Validate config
+        // validateConfig();
+
+        if (config.getConceptDetails) {
+            log('Starting Heatmap-Sync execution...');
+
+            
+            // 1. Prompt for input and output files
+            const excelPath = promptForFile('Select source Heatmap Excel Workbook', config.excelFilters, window.promptOpenFile);
+            if (!excelPath) return;
+            const csvPath = promptForFile('Heatmap output CSV File', config.csvFilters, window.promptSaveFile);
+            if (!csvPath) return;
+
+            // 2. Load Excel, read worksheet
+            if (config.debug) debug('[DEBUG] Loading SheetJS from: ' + config.sheetjsPath);
+            const wb = XLSX.read(readFileBase64(excelPath), { type: 'base64' });
+            const sheet = wb.Sheets[config.sheetName];
+            if (!sheet) throw new Error('Sheet "' + config.sheetName + '" not found');
+            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false });
+
+            // 3. Validate headers
+            const headersRow = rows[1].map(h => h.toString().trim());
+            const colIdx = c => headersRow.indexOf(c);
+            validateColumns(colIdx, config.requiredColumns);
+
+            // 4. Prepare CSV output columns
+            let propKeys = ['uid']
+                .concat(config.baseOutputCols)
+                .concat(config.flagCols)
+                .concat(config.extraCols);
+
+            config.modelProperties.forEach(key => {
+                if (!propKeys.includes(key)) propKeys.push(key);
+            });
+
+            config.supplementProperties.forEach(s => {
+                if (!propKeys.includes(s.key)) propKeys.push(s.key);
+            });
+
+            // 5. Process spreadsheet and model data
+            let matchedIds = {};
+            let allRows = [];
+            allRows = allRows.concat(processSpreadsheetRows(rows, colIdx, matchedIds, propKeys));
+            allRows = allRows.concat(processModelOnly(matchedIds, propKeys));
+
+            assignRowUUIDs(allRows, config.uuidCols, 'uid');
+
+            // 6. Write output CSV
+            log('Exporting ' + allRows.length + ' rows...');
+            let csv = buildHeader(propKeys) + '\n';
+            allRows.forEach(rec => {
+                csv += buildCsvLine(rec, propKeys) + '\n';
+            });
+            writeCsv(csv, csvPath);
+
+            window.alert('Export complete: ' + csvPath);
+        }
+
+        if (config.getRelarionshipMap) {
+
+          // 7. export concept relationship map to Excel
+          if (window.confirm('Export a model relationship map to Excel?')) {
+              log('[main] User requested relationship map Excel export.');
+              // Compose relationship map from all model elements
+              const elements = toJsArray($('element').toArray());
+              const mapRows = conceptRelationshipMap(elements, "out");
+              exportToExcel(mapRows, 'Relationships', 'Save Relationship Map Excel');
+          } else {
+              log('[main] Relationship map export skipped by user.');
+          }
+        }
+
+        log('Heatmap-Sync execution complete.');
     }
     catch (err) {
         error('Error: ' + err);
-        window.alert('Script failed: ' + err.message);
+        window.alert('Script failed: ' + (err && err.message ? err.message : err));
     }
 }
+
 
   log('Heatmap-Sync script started.');
   main();
