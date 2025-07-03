@@ -77,7 +77,7 @@
    */
   const config = {
     debug: false,
-    getConceptDetails: false,
+    getConceptDetails: true,
     getRelarionshipMap: true,    
 
     sheetjsPath:  __DIR__ + '/lib/xlsx.full.min.js',    
@@ -103,8 +103,7 @@
       'Owner',
       'Name',
       'StandardSolutionExample',
-      'ExampleUse',
-      'Type',
+      'ExampleUse',      
     ],
     uuidCols: [
       'Pri Domain',
@@ -119,6 +118,10 @@
         {
             key: "ID",
             fn: function(el) { return el && el.id ? el.id : ""; }
+        },
+        {
+            key: "Type",
+            fn: function(el) { return el && el.type ? el.type : ""; }
         },
         {
             key: "Grouped_under",
@@ -186,7 +189,7 @@ function processSpreadsheetRows(rows, colIdxFn, matchedIds, propKeys) {
 
     let output = [];
     dataRows.forEach((entry, idx) => {
-        log(' [' + (idx + 1) + '/' + dataRows.length + '] Sheet row ' + entry.sheetRow);
+        debug(' [' + (idx + 1) + '/' + dataRows.length + '] Sheet row ' + entry.sheetRow);
 
         const fc = normalize(entry.row[colIdxFn('Functional composition')] || '');
         const el = $('element').filter(e => normalize(e.name) === fc).first();
@@ -264,7 +267,7 @@ function processModelOnly(matchedIds, propKeys) {
         .filter(e => !matchedIds[e.id])
         .forEach((el, idx) => {
             count++;
-            log(' [' + count + '] Model-only element ' + el.id);
+            debug(' [' + count + '] Model-only element ' + el.id);
 
             // 1. Spreadsheet props: modelOnly, nameMatch, etc.
             let spreadsheetProps = {};
@@ -316,45 +319,45 @@ function main() {
         
         var model = getActiveModel();
         if (!model) {
-            log('No active model. Aborting.');
+            warn('No active model. Aborting.');
             return;
         }
 
         if (config.debug) {
-            log('Diagnostic information...');
+            debug('Diagnostic information...');
 
-            log('engineName :' +$.process.engine);
-            log('platform: ' + $.process.platform );
-            log('archi Name: ' + $.process.archiname );
-            log(' archi version : ' + $.process.release.archiVersion);
-            log(' jArchi name: ' + $.process.release.jArchiName);
-            log(' version : ' + $.process.release.jArchiVersion);
+            debug('engineName :' +$.process.engine);
+            debug('platform: ' + $.process.platform );
+            debug('archi Name: ' + $.process.archiname );
+            debug(' archi version : ' + $.process.release.archiVersion);
+            debug(' jArchi name: ' + $.process.release.jArchiName);
+            debug(' version : ' + $.process.release.jArchiVersion);
 
-            log('Active model: ' + model.name);
-            log('Element count: ' + $('element').size());
-            log('Relationship count: ' + $('relationship').size());
-            log('Property count: ' + $('property').size());
+            debug('Active model: ' + model.name);
+            debug('Element count: ' + $('element').size());
+            debug('Relationship count: ' + $('relationship').size());
+            debug('Property count: ' + $('property').size());
 
             // $('element').forEach(function(e) {
-            //     log('---------------------------------------------');
-            //     log('Element: ' + e.name + ' | type: ' + e.type + ' | id: ' + e.id);
+            //     debug('---------------------------------------------');
+            //     debug('Element: ' + e.name + ' | type: ' + e.type + ' | id: ' + e.id);
 
             //     // Outgoing relationships
             //     var outRels = e.outRels();
-            //     log('Number of outRels: ' + outRels.length);
+            //     debug('Number of outRels: ' + outRels.length);
             //     outRels.forEach(function(rel) {
             //         var target = rel.target;
-            //         log('  Outgoing rel type: ' + rel.type +
+            //         debug('  Outgoing rel type: ' + rel.type +
             //             ' → target element: ' +
             //             (target ? (target.name + ' (' + target.type + ')') : '[no target]'));
             //     });
 
             //     // Incoming relationships
             //     var inRels = e.inRels();
-            //     log('Number of inRels: ' + inRels.length);
+            //     debug('Number of inRels: ' + inRels.length);
             //     inRels.forEach(function(rel) {
             //         var source = rel.source;
-            //         log('  Incoming rel type: ' + rel.type +
+            //         debug('  Incoming rel type: ' + rel.type +
             //             ' ← source element: ' +
             //             (source ? (source.name + ' (' + source.type + ')') : '[no source]'));
             //     });
@@ -374,7 +377,7 @@ function main() {
                         var targetType = rel.target ? (rel.target.type || '') : '';
                         var targetId   = rel.target ? (rel.target.id   || '') : '';
 
-                        log(
+                        debug(
                             'Source Name: ' + sourceName +
                             ' | Source Type: ' + sourceType +
                             ' | Source ID: ' + sourceId +
@@ -386,7 +389,7 @@ function main() {
                         );
                     }
                 });
-                log('Element: ' + e.name + ' | Outgoing relationships: ' + outCount);
+                debug('Element: ' + e.name + ' | Outgoing relationships: ' + outCount);
             });
 
 
