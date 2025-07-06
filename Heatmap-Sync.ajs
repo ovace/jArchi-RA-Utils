@@ -202,8 +202,8 @@
  * Process sheet rows into an array of record objects.
  * Uses buildProperties() for model element data injection.
  */
-function processSpreadsheetRows(rows, colIdxFn, matchedIds, propKeys) {
-    const dataRows = rows.slice(2).map((r, i) => ({ row: r, sheetRow: i + 2 }));
+function processSpreadsheetRows(data, colIdxFn, matchedIds, propKeys) {
+    const dataRows = data.slice(2).map((r, i) => ({ row: r, sheetRow: i + 2 }));
     log.info('Processing ' + dataRows.length + ' spreadsheet rows...');
 
     const ctx = {
@@ -282,12 +282,11 @@ function processSpreadsheetRows(rows, colIdxFn, matchedIds, propKeys) {
    *    Array of row-objects keyed by column header.
    * @param {{extCol:string, refCol:string, outCol:string}} headersMap
    *    Map of your 3 columns from config.
-   * @param {boolean} enableDebug
-   *    If true, logs debug output via your logger.
+   * 
    * @returns {Object[]}
    *    Same data array, with each row[outCol] populated.
    */
-  function generateExtRef(data, headersMap, enableDebug) {
+  function generateExtRef(data, headersMap) {
     const { extCol, refCol, outCol } = headersMap;
     const cacheKey = extCol + '|' + refCol;
 
@@ -297,9 +296,14 @@ function processSpreadsheetRows(rows, colIdxFn, matchedIds, propKeys) {
       _extRef_dictCache    = {};
       _extRef_countMapCache = {};
 
+      log.debug("data length: " + data.length);
+
       // 1) Initial code assignment
       data.forEach(row => {
-        const extVal = (row[extCol]||'').toString().trim();
+        const extKey = headersMap.extCol.trim();
+        let extVal = (row[extCol]||'').toString().trim();
+        log.debug(`Column: ${extCol} Row: ${row[extCol]} extVal=${extVal} cache val=${_extRef_dictCache[extVal]}`);
+
         if (extVal && !_extRef_dictCache[extVal]) {
           const parts = extVal.split(/\s+/);
           let code = parts.length === 1
@@ -319,6 +323,7 @@ function processSpreadsheetRows(rows, colIdxFn, matchedIds, propKeys) {
       log.debug('    Checking duplicates…');
       Object.keys(_extRef_dictCache).forEach(key => {
         const code = _extRef_dictCache[key];
+        log.debug('code: ' + code + ' Cache value: ' + _extRef_countMapCache[code]);
         if (_extRef_countMapCache[code] > 1) {
           const parts = key.split(/\s+/);
           let newCode = parts.map(p => p.length>1 ? p.substring(0,2) : p.charAt(0)).join('');
@@ -338,9 +343,9 @@ function processSpreadsheetRows(rows, colIdxFn, matchedIds, propKeys) {
     data.forEach((row, idx) => {
       const extVal = (row[extCol]||'').toString().trim();
       const refVal = (row[refCol]||'').toString().trim();
-      if (enableDebug) {
-        log.debug(`Row ${idx} extVal='${extVal}' refVal='${refVal}'`);
-      }
+      
+      log.debug(`Row ${idx} extVal='${extVal}' refVal='${refVal}'`);
+      
 
       const code = _extRef_dictCache[extVal] || '';
       let result = '';
@@ -391,7 +396,7 @@ function processModelOnly(matchedIds, propKeys) {
         .filter(e => !matchedIds[e.id])
         .forEach((el, idx) => {
             count++;
-            log.debug(' [' + count + '] Model-only element ' + el.id);
+            log.debug(`[ ${count}] Model-only element ${el.id}`);
 
             // 1. Spreadsheet props: modelOnly, nameMatch, etc.
             let spreadsheetProps = {};
@@ -534,15 +539,31 @@ function main() {
               const wb = XLSX.read(readFileBase64(excelPath), { type: 'base64' });
               const sheet = wb.Sheets[config.sheetName];
               if (!sheet) throw new Error('Sheet "' + config.sheetName + '" not found');
-              var rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false });
 
-              log.debug('read rows: ' + rows.length + ' from sheet: ' + config.sheetName + ' in workbook: ' + excelPath);
+              // ★ OPTION 2: object-based loader ★
+              // 2.1 Grab & trim the raw header row (Excel row 1)
+              // 1) pull every row as an array...
+              const sheetRows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false });
+
+              // 2) now grab the *second* row (index 1) as your real header row
+              const rawHeaders = sheetRows[1].map(h => h.toString().trim());
+              log.debug('Trimmed headers (from row 2):', rawHeaders);              
+
+              // 2.2 Now read the rest of the rows into objects keyed by those headers
+              let data = XLSX.utils.sheet_to_json(sheet, {
+                header: rawHeaders,
+                range:    2,     // skip header row
+                defval:   '',    // empty strings for blank cells
+                raw:      false
+              });              
+              log.debug(`read rows data: ${data.length} from sheet: ${config.sheetName} in workbook: ${excelPath}`);
               
               // 3. Generate ext Name  extensions ext-Name
-              var rows = generateExtRef(rows, config.extHeadersMap, config.debug)
-
+              data = generateExtRef(data, config.extHeadersMap)
+              log.debug(`ext data: ${data.length}` )
               // 3. Validate headers
-              const headersRow = rows[1].map(h => h.toString().trim());
+              // const headersRow = data[1].map(h => h.toString().trim());
+              const headersRow = rawHeaders;
               log.debug('headers: ' + headersRow);
               let colIdx = c => headersRow.indexOf(c);
               validateColumns(colIdx, config.requiredColumns);
@@ -565,7 +586,7 @@ function main() {
               // 5. Process spreadsheet and model data
               let matchedIds = {};
               let allRows = [];
-              allRows = allRows.concat(processSpreadsheetRows(rows, colIdx, matchedIds, propKeys));
+              allRows = allRows.concat(processSpreadsheetRows(data, colIdx, matchedIds, propKeys));
               allRows = allRows.concat(processModelOnly(matchedIds, propKeys));
           
 
