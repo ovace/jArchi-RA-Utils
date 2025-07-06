@@ -9,11 +9,29 @@
   console.clear();
   console.show();
 
-  // Load shared libraries
+  // Load shared libraries  
   const libPath = __DIR__ + 'lib\\';
+  console.log("libPath: " + libPath);
+  const envPath = __DIR__+".env";
+  console.log("envPath: " + envPath);
+  // any of these now work
+  load(libPath + 'loadEnv.ajs').loadEnv(envPath);
+  // const { loadEnv } = require(libPath + 'loadEnv.ajs');
+  // loadEnv(envPath);
+
+  const { log } = load(libPath + 'logger.ajs');
+  // require(libPath +'logger.ajs').log.info("…");
+  log.info("global log works");
+
   const utils  = require(libPath + 'common_utils.ajs');
-  const logger = require(libPath + 'logger.ajs');
+  
   const XLSX   = require(libPath + 'xlsx.full.min.js');
+
+  // ── Module-level caches for generateExtRef ──
+    var _extRef_dictCache     = null;
+    var _extRef_countMapCache = null;
+    var _extRef_lastKey       = null;
+
 
   const { 
     assignRowUUIDs,
@@ -53,11 +71,11 @@
     writeCsv,
   } = utils;
 
-  const { log, 
-          debug, 
-          warn, 
-          error 
-        } = logger;
+//   const { log, 
+//           debug, 
+//           warn, 
+//           error 
+//         } = logger;
 
   // Configuration  
 
@@ -76,7 +94,8 @@
    * }} Config
    */
   const config = {
-    debug: false,
+    debug: true,
+    readWorkbook: true,
     getConceptDetails: true,
     getRelarionshipMap: true,    
 
@@ -88,9 +107,15 @@
     csvFilters:   [{ name: 'CSV File',      extensions: ['csv'] }],
     
     requiredColumns: ['_id','ABB Name','Functional composition','Description','Pri Domain'],
-    baseOutputCols:  ['_id','ABB Name','Functional composition','Description','Pri Domain'],
+    baseOutputCols:  ['_id','ABB Name','Functional composition', 'ext-Name', 'Description','Pri Domain'],
     flagCols:        ['Taxonomy Classification','Level','nameMatch','descMatch','modelOnly'],
     extraCols:       ['ID','Type','Grouped_under','inView'],
+
+    extHeadersMap : {
+        extCol: 'ABB Name',
+        refCol: "Functional composition",
+        outCol: 'ext-Name'
+        },
     relationshipTypes: [
       'association-relationship',
       'aggregation-relationship',
@@ -153,20 +178,20 @@
    * @returns {string} grouping name, relationship type, or ''
    */
   function getGrouping(element, relTypes) {
-    if (config.debug) debug('[DEBUG] getGrouping() for ' + element.id + '/' + element.name);
+    log.debug('getGrouping() for ' + element.id + '/' + element.name);
     for (let type of relTypes) {
       const ofType   = $('relationship').filter(r => r.type.toLowerCase() === type).toArray();
       const relevant = ofType.filter(r => r.source.id === element.id || r.target.id === element.id);
-      if (config.debug) debug('[DEBUG] - type=' + type + ', total=' + ofType.length + ', relevant=' + relevant.length);
+      log.debug('type=' + type + ', total=' + ofType.length + ', relevant=' + relevant.length);
       if (relevant.length) {
         for (let r of relevant) {
           const other = (r.source.id === element.id ? r.target : r.source);
           if (other.type.toLowerCase() === 'grouping') {
-            if (config.debug) debug('[DEBUG] - grouping found: ' + other.name);
+            log.debug('grouping found: ' + other.name);
             return other.name;
           }
         }
-        if (config.debug) debug('[DEBUG] - no grouping element; return type ' + type);
+        log.debug(' no grouping element; return type ' + type);
         return type;
       }
     }
@@ -179,7 +204,7 @@
  */
 function processSpreadsheetRows(rows, colIdxFn, matchedIds, propKeys) {
     const dataRows = rows.slice(2).map((r, i) => ({ row: r, sheetRow: i + 2 }));
-    log('Processing ' + dataRows.length + ' spreadsheet rows...');
+    log.info('Processing ' + dataRows.length + ' spreadsheet rows...');
 
     const ctx = {
         getGrouping: getGrouping,
@@ -189,7 +214,7 @@ function processSpreadsheetRows(rows, colIdxFn, matchedIds, propKeys) {
 
     let output = [];
     dataRows.forEach((entry, idx) => {
-        debug(' [' + (idx + 1) + '/' + dataRows.length + '] Sheet row ' + entry.sheetRow);
+        log.debug(' [' + (idx + 1) + '/' + dataRows.length + '] Sheet row ' + entry.sheetRow);
 
         const fc = normalize(entry.row[colIdxFn('Functional composition')] || '');
         const el = $('element').filter(e => normalize(e.name) === fc).first();
@@ -249,12 +274,111 @@ function processSpreadsheetRows(rows, colIdxFn, matchedIds, propKeys) {
     return output;
 }
 
+  /**
+   * Generate an “external ↔ reference” code for each row in a data array,
+   * mirroring VBA’s GenerateExtRef but in-memory and batched.
+   *
+   * @param {Object[]} data
+   *    Array of row-objects keyed by column header.
+   * @param {{extCol:string, refCol:string, outCol:string}} headersMap
+   *    Map of your 3 columns from config.
+   * @param {boolean} enableDebug
+   *    If true, logs debug output via your logger.
+   * @returns {Object[]}
+   *    Same data array, with each row[outCol] populated.
+   */
+  function generateExtRef(data, headersMap, enableDebug) {
+    const { extCol, refCol, outCol } = headersMap;
+    const cacheKey = extCol + '|' + refCol;
+
+    // Module‐level caches on outer scope
+    if (!_extRef_dictCache || cacheKey !== _extRef_lastKey) {
+      log.debug(`🔄 Rebuilding extRef cache for ${cacheKey}`);
+      _extRef_dictCache    = {};
+      _extRef_countMapCache = {};
+
+      // 1) Initial code assignment
+      data.forEach(row => {
+        const extVal = (row[extCol]||'').toString().trim();
+        if (extVal && !_extRef_dictCache[extVal]) {
+          const parts = extVal.split(/\s+/);
+          let code = parts.length === 1
+            ? parts[0].substring(0,3)
+            : parts.map(p => p.charAt(0)).join('');
+          code = utils.toJsArray([code]).join('').replace(/[^A-Za-z0-9]/g,'');
+          _extRef_dictCache[extVal] = code;
+          log.debug(`    Map: ${extVal} → ${code}`);
+        }
+      });
+
+      // 2) Count duplicates
+      Object.values(_extRef_dictCache)
+        .forEach(code => _extRef_countMapCache[code] = (_extRef_countMapCache[code]||0) + 1);
+
+      // 3) Upgrade duplicates to 2-chars/word
+      log.debug('    Checking duplicates…');
+      Object.keys(_extRef_dictCache).forEach(key => {
+        const code = _extRef_dictCache[key];
+        if (_extRef_countMapCache[code] > 1) {
+          const parts = key.split(/\s+/);
+          let newCode = parts.map(p => p.length>1 ? p.substring(0,2) : p.charAt(0)).join('');
+          newCode = newCode.replace(/[^A-Za-z0-9]/g,'');
+          _extRef_dictCache[key] = newCode;
+          log.debug(`      Upgraded: ${key} → ${newCode}`);
+        }
+      });
+
+      _extRef_lastKey = cacheKey;
+    }
+    else 
+      log.debug(`✅ Using cached extRef map for ${cacheKey}`);
+    
+
+    // 4) Compute & assign result per row
+    data.forEach((row, idx) => {
+      const extVal = (row[extCol]||'').toString().trim();
+      const refVal = (row[refCol]||'').toString().trim();
+      if (enableDebug) {
+        log.debug(`Row ${idx} extVal='${extVal}' refVal='${refVal}'`);
+      }
+
+      const code = _extRef_dictCache[extVal] || '';
+      let result = '';
+      if (extVal && extVal.toLowerCase() === refVal.toLowerCase()) {
+        result = extVal;
+      }
+      else if (!code && !refVal) {
+        result = '';
+      }
+      else if (!refVal) {
+        result = code;
+      }
+      else if (!code) {
+        result = refVal;
+      }
+      else if (code.replace(/\s+/g,'').toLowerCase() === refVal.replace(/\s+/g,'').toLowerCase()) {
+        result = refVal;
+      }
+      else {
+        result = `${code}-${refVal}`;
+      }
+
+      log.debug(`→ result: ${result}`);
+      row[outCol] = result;
+    });
+
+    return data;
+  }
+
+  //— End of new generateExtRef helper ——
+
+
 /**
  * Process model-only elements (not matched in spreadsheet).
  * Returns array of records, one per unmatched model element.
  */
 function processModelOnly(matchedIds, propKeys) {
-    log('Processing model-only elements...');
+    log.info('Processing model-only elements...');
     let output = [];
     let count = 0;
     const ctx = {
@@ -267,7 +391,7 @@ function processModelOnly(matchedIds, propKeys) {
         .filter(e => !matchedIds[e.id])
         .forEach((el, idx) => {
             count++;
-            debug(' [' + count + '] Model-only element ' + el.id);
+            log.debug(' [' + count + '] Model-only element ' + el.id);
 
             // 1. Spreadsheet props: modelOnly, nameMatch, etc.
             let spreadsheetProps = {};
@@ -319,133 +443,136 @@ function main() {
         
         var model = getActiveModel();
         if (!model) {
-            warn('No active model. Aborting.');
+            log.warn('No active model. Aborting.');
             return;
         }
 
-        if (config.debug) {
-            debug('Diagnostic information...');
+       
+          log.debug('Diagnostic information...');
 
-            debug('engineName :' +$.process.engine);
-            debug('platform: ' + $.process.platform );
-            debug('archi Name: ' + $.process.archiname );
-            debug(' archi version : ' + $.process.release.archiVersion);
-            debug(' jArchi name: ' + $.process.release.jArchiName);
-            debug(' version : ' + $.process.release.jArchiVersion);
+          log.debug('engineName :' +$.process.engine);
+          log.debug('platform: ' + $.process.platform );
+          log.debug('archi Name: ' + $.process.archiname );
+          log.debug(' archi version : ' + $.process.release.archiVersion);
+          log.debug(' jArchi name: ' + $.process.release.jArchiName);
+          log.debug(' version : ' + $.process.release.jArchiVersion);
 
-            debug('Active model: ' + model.name);
-            debug('Element count: ' + $('element').size());
-            debug('Relationship count: ' + $('relationship').size());
-            debug('Property count: ' + $('property').size());
+          log.debug('Active model: ' + model.name);
+          log.debug('Element count: ' + $('element').size());
+          log.debug('Relationship count: ' + $('relationship').size());
+          log.debug('Property count: ' + $('property').size());
 
-            // $('element').forEach(function(e) {
-            //     debug('---------------------------------------------');
-            //     debug('Element: ' + e.name + ' | type: ' + e.type + ' | id: ' + e.id);
+          // $('element').forEach(function(e) {
+          //     log.debug('---------------------------------------------');
+          //     log.debug('Element: ' + e.name + ' | type: ' + e.type + ' | id: ' + e.id);
 
-            //     // Outgoing relationships
-            //     var outRels = e.outRels();
-            //     debug('Number of outRels: ' + outRels.length);
-            //     outRels.forEach(function(rel) {
-            //         var target = rel.target;
-            //         debug('  Outgoing rel type: ' + rel.type +
-            //             ' → target element: ' +
-            //             (target ? (target.name + ' (' + target.type + ')') : '[no target]'));
-            //     });
+          //     // Outgoing relationships
+          //     var outRels = e.outRels();
+          //     log.debug('Number of outRels: ' + outRels.length);
+          //     outRels.forEach(function(rel) {
+          //         var target = rel.target;
+          //         log.debug('  Outgoing rel type: ' + rel.type +
+          //             ' → target element: ' +
+          //             (target ? (target.name + ' (' + target.type + ')') : '[no target]'));
+          //     });
 
-            //     // Incoming relationships
-            //     var inRels = e.inRels();
-            //     debug('Number of inRels: ' + inRels.length);
-            //     inRels.forEach(function(rel) {
-            //         var source = rel.source;
-            //         debug('  Incoming rel type: ' + rel.type +
-            //             ' ← source element: ' +
-            //             (source ? (source.name + ' (' + source.type + ')') : '[no source]'));
-            //     });
-            // });
-            $('element').each(function(e) {
-                var outCount = 0;
-                $('relationship').each(function(rel) {
-                    if (rel.source && rel.source.id === e.id) {
-                        outCount++;
-                        // Gather info for source, relationship, target
-                        var sourceName = e.name || '';
-                        var sourceType = e.type || '';
-                        var sourceId   = e.id || '';
-                        var relType    = rel.type || '';
-                        var relId      = rel.id || '';
-                        var targetName = rel.target ? (rel.target.name || '') : '';
-                        var targetType = rel.target ? (rel.target.type || '') : '';
-                        var targetId   = rel.target ? (rel.target.id   || '') : '';
+          //     // Incoming relationships
+          //     var inRels = e.inRels();
+          //     log.debug('Number of inRels: ' + inRels.length);
+          //     inRels.forEach(function(rel) {
+          //         var source = rel.source;
+          //         log.debug('  Incoming rel type: ' + rel.type +
+          //             ' ← source element: ' +
+          //             (source ? (source.name + ' (' + source.type + ')') : '[no source]'));
+          //     });
+          // });
+          // $('element').each(function(e) {
+          //     var outCount = 0;
+          //     $('relationship').each(function(rel) {
+          //         if (rel.source && rel.source.id === e.id) {
+          //             outCount++;
+          //             // Gather info for source, relationship, target
+          //             var sourceName = e.name || '';
+          //             var sourceType = e.type || '';
+          //             var sourceId   = e.id || '';
+          //             var relType    = rel.type || '';
+          //             var relId      = rel.id || '';
+          //             var targetName = rel.target ? (rel.target.name || '') : '';
+          //             var targetType = rel.target ? (rel.target.type || '') : '';
+          //             var targetId   = rel.target ? (rel.target.id   || '') : '';
 
-                        debug(
-                            'Source Name: ' + sourceName +
-                            ' | Source Type: ' + sourceType +
-                            ' | Source ID: ' + sourceId +
-                            ' | Relationship Type: ' + relType +
-                            ' | Relationship ID: ' + relId +
-                            ' | Target Name: ' + targetName +
-                            ' | Target Type: ' + targetType +
-                            ' | Target ID: ' + targetId
-                        );
-                    }
-                });
-                debug('Element: ' + e.name + ' | Outgoing relationships: ' + outCount);
-            });
-
-
-
-        } // end debug
-
+          //             log.debug(
+          //                 'Source Name: ' + sourceName +
+          //                 ' | Source Type: ' + sourceType +
+          //                 ' | Source ID: ' + sourceId +
+          //                 ' | Relationship Type: ' + relType +
+          //                 ' | Relationship ID: ' + relId +
+          //                 ' | Target Name: ' + targetName +
+          //                 ' | Target Type: ' + targetType +
+          //                 ' | Target ID: ' + targetId
+          //             );
+          //         }
+          //     });
+          //     log.debug('Element: ' + e.name + ' | Outgoing relationships: ' + outCount);
+          // });
 
         // 0. Validate config
         // validateConfig();
 
         if (config.getConceptDetails) {
-            log('Starting Heatmap-Sync execution...');
+            log.info('Starting Heatmap-Sync execution...');
 
+              log.info('Starting read workbook '+ '...')
+              // 1. Prompt for input and output files
+              const excelPath = promptForFile('Select source Heatmap Excel Workbook', config.excelFilters, window.promptOpenFile);
+              if (!excelPath) return;
+              const csvPath = promptForFile('Heatmap output CSV File', config.csvFilters, window.promptSaveFile);
+              if (!csvPath) return;
+              log.debug('reading Excel from: ' + excelPath);
+              // 2. Load Excel, read worksheet
+              log.debug('Loading SheetJS from: ' + config.sheetjsPath);
+              const wb = XLSX.read(readFileBase64(excelPath), { type: 'base64' });
+              const sheet = wb.Sheets[config.sheetName];
+              if (!sheet) throw new Error('Sheet "' + config.sheetName + '" not found');
+              var rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false });
+
+              log.debug('read rows: ' + rows.length + ' from sheet: ' + config.sheetName + ' in workbook: ' + excelPath);
+              
+              // 3. Generate ext Name  extensions ext-Name
+              var rows = generateExtRef(rows, config.extHeadersMap, config.debug)
+
+              // 3. Validate headers
+              const headersRow = rows[1].map(h => h.toString().trim());
+              log.debug('headers: ' + headersRow);
+              let colIdx = c => headersRow.indexOf(c);
+              validateColumns(colIdx, config.requiredColumns);
+                        
             
-            // 1. Prompt for input and output files
-            const excelPath = promptForFile('Select source Heatmap Excel Workbook', config.excelFilters, window.promptOpenFile);
-            if (!excelPath) return;
-            const csvPath = promptForFile('Heatmap output CSV File', config.csvFilters, window.promptSaveFile);
-            if (!csvPath) return;
+              // 4. Prepare CSV output columns
+              let propKeys = ['uid']
+                  .concat(config.baseOutputCols)
+                  .concat(config.flagCols)
+                  .concat(config.extraCols);
 
-            // 2. Load Excel, read worksheet
-            if (config.debug) debug('[DEBUG] Loading SheetJS from: ' + config.sheetjsPath);
-            const wb = XLSX.read(readFileBase64(excelPath), { type: 'base64' });
-            const sheet = wb.Sheets[config.sheetName];
-            if (!sheet) throw new Error('Sheet "' + config.sheetName + '" not found');
-            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false });
+              config.modelProperties.forEach(key => {
+                  if (!propKeys.includes(key)) propKeys.push(key);
+              });
 
-            // 3. Validate headers
-            const headersRow = rows[1].map(h => h.toString().trim());
-            const colIdx = c => headersRow.indexOf(c);
-            validateColumns(colIdx, config.requiredColumns);
+              config.supplementProperties.forEach(s => {
+                  if (!propKeys.includes(s.key)) propKeys.push(s.key);
+              });
 
-            // 4. Prepare CSV output columns
-            let propKeys = ['uid']
-                .concat(config.baseOutputCols)
-                .concat(config.flagCols)
-                .concat(config.extraCols);
-
-            config.modelProperties.forEach(key => {
-                if (!propKeys.includes(key)) propKeys.push(key);
-            });
-
-            config.supplementProperties.forEach(s => {
-                if (!propKeys.includes(s.key)) propKeys.push(s.key);
-            });
-
-            // 5. Process spreadsheet and model data
-            let matchedIds = {};
-            let allRows = [];
-            allRows = allRows.concat(processSpreadsheetRows(rows, colIdx, matchedIds, propKeys));
-            allRows = allRows.concat(processModelOnly(matchedIds, propKeys));
+              // 5. Process spreadsheet and model data
+              let matchedIds = {};
+              let allRows = [];
+              allRows = allRows.concat(processSpreadsheetRows(rows, colIdx, matchedIds, propKeys));
+              allRows = allRows.concat(processModelOnly(matchedIds, propKeys));
+          
 
             assignRowUUIDs(allRows, config.uuidCols, 'uid');
 
             // 6. Write output CSV
-            log('Exporting ' + allRows.length + ' rows...');
+            log.info('Exporting ' + allRows.length + ' rows...');
             let csv = buildHeader(propKeys) + '\n';
             allRows.forEach(rec => {
                 csv += buildCsvLine(rec, propKeys) + '\n';
@@ -459,25 +586,25 @@ function main() {
 
           // 7. export concept relationship map to Excel
           if (window.confirm('Export a model relationship map to Excel?')) {
-              log('[main] User requested relationship map Excel export.');
+              log.info('[main] User requested relationship map Excel export.');
               // Compose relationship map from all model elements
               const elements = toJsArray($('element').toArray());
               const mapRows = conceptRelationshipMap(elements, "out");
               exportToExcel(mapRows, 'Relationships', 'Save Relationship Map Excel');
           } else {
-              log('[main] Relationship map export skipped by user.');
+              log.info('[main] Relationship map export skipped by user.');
           }
         }
 
-        log('Heatmap-Sync execution complete.');
+        log.info('Heatmap-Sync execution complete.');
     }
     catch (err) {
-        error('Error: ' + err);
+        log.error('Error: ' + err);
         window.alert('Script failed: ' + (err && err.message ? err.message : err));
     }
 }
 
 
-  log('Heatmap-Sync script started.');
-  main();
+    log.info('Heatmap-Sync script started.');    
+    main();
 })();

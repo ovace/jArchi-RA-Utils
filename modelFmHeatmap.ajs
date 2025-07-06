@@ -85,7 +85,7 @@ var CONFIG = {
                       "ExampleUse"
               ],
     propertyNames: {
-        hmuuid: "uid", name: "Functional composition", abb: "ABB Name", type: "Type",
+        hmuuid: "uid", srcMdlId: "ID", name: "Functional composition", abb: "ABB Name", type: "Type",
         description: "Description", taxonomy: "Taxonomy Classification",
         level: "Level", modelOnly: "modelOnly", grouped: "Grouped_under",
         inView: "inView", domain: "Pri Domain", id: "_id", version: "Version", 
@@ -103,14 +103,14 @@ var CONFIG = {
         "Deployment",
         "Development",
         "Governance",
-        "Information and Data",
-        "Information_Data",
+        "Data-Information",        
         "Infrastructure",
-        "Interactions",
+        "Interaction",
         "Observability",
         "Operations",
         "Security",
-        "Telemetry"
+        "Telemetry",
+        "Taxonomy"
     ],
     outputCSVheaders: [
         "hm_uuid",
@@ -354,11 +354,11 @@ function ensureHeatMapTaxonomyStructure(rootFolder, taxonomySegmentFolders) {
  */
 function createOrUpdateElementFromObj(obj, rootFolder) {
 
-  log("INFO", `Begin createOrUpdate for '${obj && obj.Name}'`);
+  log(`Begin createOrUpdate for '${obj && obj.Name}'`);
 
   // 1) Basic validation
   if (!obj || typeof obj !== "object") {
-    error("ERROR", `Invalid source object: ${JSON.stringify(obj)}`);
+    error(`Invalid source object: ${JSON.stringify(obj)}`);
     throw new Error("Invalid object parameter");
   }
   if (!rootFolder || rootFolder.type !== "folder") {
@@ -371,15 +371,15 @@ function createOrUpdateElementFromObj(obj, rootFolder) {
   const description = String(unescapeString(obj.Description) || "").trim();
 
   if (!name) {
-    error("ERROR", `Missing Name in source object. Aborting.`);
+    error(`Missing Name in source object. Aborting.`);
     throw new Error("Missing required Name");
   }
   if (!type) {
-    error("ERROR", `Missing Type for '${name}'. Aborting.`);
+    error(`Missing Type for '${name}'. Aborting.`);
     throw new Error("Missing required Type");
   }
 
-  debug("DEBUG", `Validated inputs: name='${name}', type='${type}'`);
+  debug(`Validated inputs: name='${name}', type='${type}'`);
 
   // 2) Find or create element
   let elem, isUpdate;
@@ -394,11 +394,11 @@ function createOrUpdateElementFromObj(obj, rootFolder) {
     if (isUpdate) {
       // c) unwrap the first element from the collection
       elem = filtered.get(0);
-      debug("DEBUG", `Found existing element '${name}' (${type}), will update`);
+      debug(`Found existing element '${name}' (${type}), will update`);
     }
     else {
       elem = model.createElement(type, name);
-      debug("DEBUG", `Created new element '${name}' (${type})`);
+      debug(`Created new element '${name}' (${type})`);
     }
 
     if (!elem) {
@@ -406,17 +406,17 @@ function createOrUpdateElementFromObj(obj, rootFolder) {
     }
   }
   catch(e) {
-    error("ERROR", `Error finding/creating element '${name}': ${e.message}`);
+    error(`Error finding/creating element '${name}': ${e.message}`);
     throw e;
   }
 
   // 3) Set documentation
   try {
     elem.documentation = description;
-    debug("DEBUG", `Documentation set for '${name}': '${description}'`);
+    debug(`Documentation set for '${name}': '${description}'`);
   }
   catch(e) {
-    warn("WARN", `Failed to set documentation on '${name}': ${e.message}`);
+    warn(`Failed to set documentation on '${name}': ${e.message}`);
   }
 
   // 4) Set custom properties from obj
@@ -430,10 +430,10 @@ function createOrUpdateElementFromObj(obj, rootFolder) {
 
     try {
       elem.prop(propKey, val, true);
-      debug("DEBUG", `Property '${propKey}'='${val}' on '${name}'`);
+      debug(`Property '${propKey}'='${val}' on '${name}'`);
     }
     catch(e) {
-      warn("WARN", `Failed to set prop '${propKey}' on '${name}': ${e.message}`);
+      warn( `Failed to set prop '${propKey}' on '${name}': ${e.message}`);
     }
   });
 
@@ -443,15 +443,15 @@ function createOrUpdateElementFromObj(obj, rootFolder) {
   if (taxKey) {
     try {
       targetFolder = getOrCreateTaxonomyFolder(rootFolder, taxKey);
-      log("INFO", `Using taxonomy folder '${taxKey}' under '${rootFolder.name}'`);
+      log(`Using taxonomy folder '${taxKey}' under '${rootFolder.name}'`);
     }
     catch(e) {
-      warn("WARN", `Could not create/find taxonomy folder '${taxKey}': ${e.message}`);
+      warn(`Could not create/find taxonomy folder '${taxKey}': ${e.message}`);
       targetFolder = rootFolder;
     }
   }
   else {
-    warn("WARN", `No Domain for '${name}', using root folder '${rootFolder.name}'`);
+    warn(`No Domain for '${name}', using root folder '${rootFolder.name}'`);
   }
 
   // 6) Add/move element into targetFolder if needed
@@ -463,17 +463,17 @@ function createOrUpdateElementFromObj(obj, rootFolder) {
 
     if (!alreadyInFolder) {
       targetFolder.add(elem);
-      debug("DEBUG", `${isUpdate ? "Moved" : "Added"} '${name}' to folder '${targetFolder.name}'`);
+      debug(`${isUpdate ? "Moved" : "Added"} '${name}' to folder '${targetFolder.name}'`);
     }
     else {
-      debug("DEBUG", `'${name}' already in '${targetFolder.name}', skipping move`);
+      debug(`'${name}' already in '${targetFolder.name}', skipping move`);
     }
   }
   catch(e) {
-    error("ERROR", `Failed to assign '${name}' to folder '${targetFolder.name}': ${e.message}`);
+    error(`Failed to assign '${name}' to folder '${targetFolder.name}': ${e.message}`);
   }
 
-  log("INFO", `Finished createOrUpdate for '${name}' → ${isUpdate ? "updated" : "added"}`);
+  log(`Finished createOrUpdate for '${name}' → ${isUpdate ? "updated" : "added"}`);
   return isUpdate ? "updated" : "added";
 }
 
