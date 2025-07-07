@@ -132,7 +132,7 @@
     ],
     uuidCols: [
       'Pri Domain',
-      'Functional composition',
+      'ext-Name',
       'ABB Name'      
     ],
     /**
@@ -201,41 +201,111 @@
 /**
  * Process sheet rows into an array of record objects.
  * Uses buildProperties() for model element data injection.
+ *
+ * @param {Array|Object}  data       Raw sheet data: 
+ *                                   - array of arrays (sheet_to_json header:1) 
+ *                                   - array of objects (sheet_to_json header:keys) 
+ *                                   - or a single object.
+ * @param {Function}      colIdxFn   Maps a column name to either an index (for arrays)
+ *                                   or a property key (for objects).
+ * @param {Object}        matchedIds Accumulator; we set matchedIds[el.id] = true when we find a model element.
+ * @param {string[]}      propKeys   List of all property keys to include in each output record.
+ *
+ * @returns {Object[]} An array of “record” objects keyed by propKeys.
  */
 function processSpreadsheetRows(data, colIdxFn, matchedIds, propKeys) {
-    const dataRows = data.slice(2).map((r, i) => ({ row: r, sheetRow: i + 2 }));
-    log.info('Processing ' + dataRows.length + ' spreadsheet rows...');
+    // 1. Validate inputs
+    if (typeof colIdxFn !== 'function') {
+        throw new TypeError('colIdxFn must be a function');
+    }
+    if (!Array.isArray(propKeys)) {
+        throw new TypeError('propKeys must be an array of strings');
+    }
 
+    log.debug('propKeys:', JSON.stringify(propKeys));
+    log.debug('matchedIds (before):', JSON.stringify(matchedIds));
+
+    // 2. Normalize into [{ row, sheetRow }, …]
+    let normalizedData = [];
+
+    if (Array.isArray(data)) {
+        if (data.length > 0 && typeof data[0] === 'object' && !Array.isArray(data[0])) {
+            // Already an array of objects
+            normalizedData = data.map((rowObj, i) => ({
+                row:      rowObj,
+                sheetRow: i + 1            // adjust if you have header/title rows
+            }));
+        }
+        else {
+            // Array of arrays → drop first two (title + header), then wrap
+            normalizedData = data
+              .slice(2)
+              .map((rowArr, i) => ({
+                  row:      rowArr,
+                  sheetRow: i + 3          // if slice(2), the first real data row is sheet-row #3
+              }));
+        }
+    }
+    else if (data !== null && typeof data === 'object') {
+        // Single object → wrap into one-entry array
+        normalizedData = [{ row: data, sheetRow: 1 }];
+    }
+    else {
+        throw new TypeError(`Unsupported data type: ${typeof data}`);
+    }
+
+    // 3. Debug–print first 3 entries
+    normalizedData.slice(0, 3).forEach(({ row, sheetRow }, idx) => {
+        log.debug(
+            `Sample #${idx} (sheetRow=${sheetRow}): ` +
+            JSON.stringify(row, null, 2)
+        );
+    });
+
+    log.info(`Processing ${normalizedData.length} spreadsheet rows…`);
+
+    // 4. Prepare context for buildProperties
     const ctx = {
-        getGrouping: getGrouping,
+        getGrouping:    getGrouping,
         getElementViews: getElementViews,
-        relTypeIds: relTypeIds
+        relTypeIds:     relTypeIds
     };
 
-    let output = [];
-    dataRows.forEach((entry, idx) => {
-        log.debug(' [' + (idx + 1) + '/' + dataRows.length + '] Sheet row ' + entry.sheetRow);
+    // 5. Core loop
+    const output = [];
+    normalizedData.forEach(({ row, sheetRow }, idx) => {
+        log.debug(`[${idx + 1}/${normalizedData.length}] sheetRow=${sheetRow}`);
 
-        const fc = normalize(entry.row[colIdxFn('Functional composition')] || '');
-        const el = $('element').filter(e => normalize(e.name) === fc).first();
+        // 5.1 Lookup your Archi element by “Functional composition”
+        const fcKey   = 'Functional composition';
+        const fcIndex = colIdxFn(fcKey);
+        const fcRaw   = (row[fcIndex] || '').toString();
+        const fcNorm  = normalize(fcRaw);
+        const el      = $('element')
+                          .filter(e => normalize(e.name) === fcNorm)
+                          .first();
 
-        // 1. Spreadsheet props
-        let spreadsheetProps = {};
-        propKeys.forEach(col => { spreadsheetProps[col] = ''; });
+        // 5.2 Build spreadsheetProps
+        const spreadsheetProps = {};
+        propKeys.forEach(k => { spreadsheetProps[k] = ''; });
         config.baseOutputCols.forEach(col => {
-            spreadsheetProps[col] = entry.row[colIdxFn(col)] || '';
+            const idxKey = colIdxFn(col);
+            spreadsheetProps[col] = row[idxKey] || '';
         });
-        spreadsheetProps['nameMatch'] = '0';
-        spreadsheetProps['descMatch'] = '0';
-        spreadsheetProps['modelOnly'] = '0';
+        spreadsheetProps.nameMatch  = '0';
+        spreadsheetProps.descMatch  = '0';
+        spreadsheetProps.modelOnly  = '0';
 
-        // 2. Model props
+        // 5.3 If we found a model element, pull in its properties
         let modelProps = {};
         if (el) {
-            spreadsheetProps['nameMatch'] = '1';
-            const docNorm = normalize(el.documentation || '');
-            const descNorm = normalize(entry.row[colIdxFn('Description')] || '');
-            if (docNorm === descNorm) spreadsheetProps['descMatch'] = '1';
+            spreadsheetProps.nameMatch = '1';
+            const docNorm  = normalize(el.documentation || '');
+            const descIdx  = colIdxFn('Description');
+            const descNorm = normalize((row[descIdx] || '').toString());
+            if (docNorm === descNorm) {
+                spreadsheetProps.descMatch = '1';
+            }
             matchedIds[el.id] = true;
             modelProps = buildProperties(
                 el,
@@ -243,36 +313,41 @@ function processSpreadsheetRows(data, colIdxFn, matchedIds, propKeys) {
                 config.supplementProperties,
                 ctx
             );
-        } else {
+        }
+        else {
+            // mark orphans
             config.supplementProperties.forEach(supp => {
-                if (supp.key === 'inView') modelProps[supp.key] = 'Orphan';
+                if (supp.key === 'inView') {
+                    modelProps[supp.key] = 'Orphan';
+                }
             });
         }
 
-        // 3. Dynamic values (if you use them; optional)
+        // 5.4 (Optional) collect dynamic values
         let dynVals = {};
-        // dynVals = collectPropValues(el, propKeys); // if you use this
+        // dynVals = collectPropValues(el, propKeys);
 
-        // 4. Chain merges (spreadsheet < model < dynVals)
-        let rec = {};
-        propKeys.forEach(key => { rec[key] = ''; });
-        mergeDynamicProps(rec, spreadsheetProps, propKeys);        // Lowest priority
-        mergeDynamicProps(rec, modelProps, propKeys);              // Only if not already present
-        mergeDynamicProps(rec, dynVals, propKeys, true);           // dynVals always wins if not empty
+        // 5.5 Merge priority: spreadsheet < model < dyn
+        const rec = {};
+        propKeys.forEach(k => { rec[k] = ''; });
+        mergeDynamicProps(rec, spreadsheetProps, propKeys);
+        mergeDynamicProps(rec, modelProps,       propKeys);
+        mergeDynamicProps(rec, dynVals,          propKeys, true);
 
-        // 5. Guarantee spreadsheet override for these (optional, as before)
-        if ('Taxonomy Classification' in rec) {
-            rec['Taxonomy Classification'] = entry.row[colIdxFn('Taxonomy Classification')] || rec['Taxonomy Classification'] || '';
-        }
-        if ('Level' in rec) {
-            rec['Level'] = entry.row[colIdxFn('Level')] || rec['Level'] || '';
-        }
+        // 5.6 Force spreadsheet override on these columns
+        ['Taxonomy Classification','Level'].forEach(col => {
+            if (col in rec) {
+                const idxKey = colIdxFn(col);
+                rec[col] = (row[idxKey] || rec[col] || '').toString();
+            }
+        });
 
         output.push(rec);
     });
 
     return output;
 }
+
 
   /**
    * Generate an “external ↔ reference” code for each row in a data array,
@@ -560,11 +635,24 @@ function main() {
               
               // 3. Generate ext Name  extensions ext-Name
               data = generateExtRef(data, config.extHeadersMap)
-              log.debug(`ext data: ${data.length}` )
-              // 3. Validate headers
-              // const headersRow = data[1].map(h => h.toString().trim());
-              const headersRow = rawHeaders;
-              log.debug('headers: ' + headersRow);
+              log.debug(`ext data: ${data.length} headers: ${JSON.stringify(config.extHeadersMap)}` )
+              
+              // 3. Validate headers (object-based `data`)
+              const headersRow = Object
+                .keys(data[0])
+                .map(h => h.toString().trim());
+              log.debug('headers with ext: ' + headersRow.join(', '));
+
+              // (optional) make sure your extHeadersMap values are present
+              const missing = Object
+                .values(config.extHeadersMap)
+                .filter(h => !headersRow.includes(h));
+              if (missing.length) {
+                throw new Error(
+                  `Missing expected headers in sheet: ${missing.join(', ')}`
+                );
+              }
+             
               let colIdx = c => headersRow.indexOf(c);
               validateColumns(colIdx, config.requiredColumns);
                         
@@ -594,6 +682,7 @@ function main() {
 
             // 6. Write output CSV
             log.info('Exporting ' + allRows.length + ' rows...');
+            log.info(`propKeys: ${propKeys}`);
             let csv = buildHeader(propKeys) + '\n';
             allRows.forEach(rec => {
                 csv += buildCsvLine(rec, propKeys) + '\n';
