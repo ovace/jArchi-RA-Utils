@@ -139,7 +139,7 @@
       },
     extModelMap : {
         extCol: 'Taxonomy Classification',
-        refCol: "ABB Name",
+        refCol: ['Functional composition', 'ABB Name'], 
         outCol: 'ext-Name'
     },
     relationshipTypes: [
@@ -314,105 +314,128 @@ function getGrouping(element, relTypes, relTargetTypes) {
 }
 
   /**
-   * Generate an “external ↔ reference” code for each row in a data array,
-   * mirroring VBA’s GenerateExtRef but in-memory and batched.
-   *
-   * @param {Object[]} data
-   *    Array of row-objects keyed by column header.
-   * @param {{extCol:string, refCol:string, outCol:string}} headersMap
-   *    Map of your 3 columns from config.
-   * 
-   * @returns {Object[]}
-   *    Same data array, with each row[outCol] populated.
-   */
-  function generateExtRef(data, headersMap) {
-    const { extCol, refCol, outCol } = headersMap;
-    const cacheKey = extCol + '|' + refCol;
+ * Generate an “external ↔ reference” code for each row in a data array,
+ * mirroring VBA’s GenerateExtRef but in-memory and batched.
+ * Supports a prioritized list of reference columns.
+ *
+ * @param {Object[]} data
+ *   Array of row-objects keyed by column header.
+ * @param {{extCol:string, refCol:string|string[], outCol:string}} headersMap
+ *   extCol: name of the column containing the external value;
+ *   refCol: either a single column name or an array of names in priority order;
+ *   outCol: name of the column to write the result into.
+ * @returns {Object[]}  
+ *   The same data array, with each row[outCol] populated.
+ *
+ * @throws {TypeError} if inputs are invalid
+ */
+function generateExtRef(data, headersMap) {
+  // 0. Validate inputs
+  if (!Array.isArray(data)) {
+    throw new TypeError('generateExtRef(): data must be an array of objects');
+  }
+  if (!headersMap || typeof headersMap.extCol !== 'string' || !headersMap.extCol.trim()) {
+    throw new TypeError('generateExtRef(): headersMap.extCol must be a non-empty string');
+  }
+  if (!headersMap.outCol || typeof headersMap.outCol !== 'string') {
+    throw new TypeError('generateExtRef(): headersMap.outCol must be a string');
+  }
 
-    // Module‐level caches on outer scope
-    if (!_extRef_dictCache || cacheKey !== _extRef_lastKey) {
-      log.debug(`Rebuilding extRef cache for ${cacheKey}`);
-      _extRef_dictCache    = {};
-      _extRef_countMapCache = {};
+  const extCol  = headersMap.extCol.trim();
+  const refCols = Array.isArray(headersMap.refCol)
+                    ? headersMap.refCol.map(c => c.trim()).filter(c => c)
+                    : [ headersMap.refCol.trim() ];
+  const outCol  = headersMap.outCol.trim();
+  const cacheKey = `${extCol}|${refCols.join(',')}`;
 
-      log.debug("data length: " + data.length);
+  log.debug('generateExtRef():', {
+    extCol, refCols, outCol, cacheKey, rowCount: data.length
+  });
 
-      // 1) Initial code assignment
-      data.forEach(row => {
-        const extKey = headersMap.extCol.trim();
-        let extVal = (row[extCol]||'').toString().trim();
-        log.debug(`Column: ${extCol} Row: ${row[extCol]} extVal=${extVal} cache val=${_extRef_dictCache[extVal]}`);
+  // 1. Build or reuse the cache
+  if (!_extRef_dictCache || cacheKey !== _extRef_lastKey) {
+    log.debug(`Rebuilding extRef cache for key="${cacheKey}"`);
+    _extRef_dictCache    = {};
+    _extRef_countMapCache = {};
 
-        if (extVal && !_extRef_dictCache[extVal]) {
-          const parts = extVal.split(/\s+/);
-          let code = parts.length === 1
-            ? parts[0].substring(0,3)
-            : parts.map(p => p.charAt(0)).join('');
-          code = utils.toJsArray([code]).join('').replace(/[^A-Za-z0-9]/g,'');
-          _extRef_dictCache[extVal] = code;
-          log.debug(`    Map: ${extVal} → ${code}`);
-        }
-      });
-
-      // 2) Count duplicates
-      Object.values(_extRef_dictCache)
-        .forEach(code => _extRef_countMapCache[code] = (_extRef_countMapCache[code]||0) + 1);
-
-      // 3) Upgrade duplicates to 2-chars/word
-      log.debug('    Checking duplicates…');
-      Object.keys(_extRef_dictCache).forEach(key => {
-        const code = _extRef_dictCache[key];
-        log.debug('code: ' + code + ' Cache value: ' + _extRef_countMapCache[code]);
-        if (_extRef_countMapCache[code] > 1) {
-          const parts = key.split(/\s+/);
-          let newCode = parts.map(p => p.length>1 ? p.substring(0,2) : p.charAt(0)).join('');
-          newCode = newCode.replace(/[^A-Za-z0-9]/g,'');
-          _extRef_dictCache[key] = newCode;
-          log.debug(`      Upgraded: ${key} → ${newCode}`);
-        }
-      });
-
-      _extRef_lastKey = cacheKey;
-    }
-    else 
-      log.debug(`✅ Using cached extRef map for ${cacheKey}`);
-    
-
-    // 4) Compute & assign result per row
-    data.forEach((row, idx) => {
-      const extVal = (row[extCol]||'').toString().trim();
-      const refVal = (row[refCol]||'').toString().trim();
-      
-      log.debug(`Row ${idx} extVal='${extVal}' refVal='${refVal}'`);
-      
-
-      const code = _extRef_dictCache[extVal] || '';
-      let result = '';
-      if (extVal && extVal.toLowerCase() === refVal.toLowerCase()) {
-        result = extVal;
+    // 1a. Initial code generation per distinct extVal
+    data.forEach(row => {
+      const extVal = (row[extCol] || '').toString().trim();
+      if (extVal && !_extRef_dictCache[extVal]) {
+        const parts = extVal.split(/\s+/);
+        let code = parts.length === 1
+          ? parts[0].substring(0, 3)
+          : parts.map(p => p.charAt(0)).join('');
+        code = utils.toJsArray([code]).join('').replace(/[^A-Za-z0-9]/g, '');
+        _extRef_dictCache[extVal] = code;
+        log.debug(`  Cache map: "${extVal}" → "${code}"`);
       }
-      else if (!code && !refVal) {
-        result = '';
-      }
-      else if (!refVal) {
-        result = code;
-      }
-      else if (!code) {
-        result = refVal;
-      }
-      else if (code.replace(/\s+/g,'').toLowerCase() === refVal.replace(/\s+/g,'').toLowerCase()) {
-        result = refVal;
-      }
-      else {
-        result = `${code}-${refVal}`;
-      }
-
-      log.debug(`→ result: ${result}`);
-      row[outCol] = result;
     });
 
-    return data;
+    // 1b. Count duplicates
+    Object.values(_extRef_dictCache).forEach(code => {
+      _extRef_countMapCache[code] = (_extRef_countMapCache[code] || 0) + 1;
+    });
+
+    // 1c. Upgrade duplicate codes to 2 letters per word
+    log.debug('Checking for duplicate codes to upgrade…');
+    Object.keys(_extRef_dictCache).forEach(key => {
+      const code = _extRef_dictCache[key];
+      if (_extRef_countMapCache[code] > 1) {
+        const parts = key.split(/\s+/);
+        let newCode = parts
+          .map(p => p.length > 1 ? p.substring(0, 2) : p.charAt(0))
+          .join('');
+        newCode = newCode.replace(/[^A-Za-z0-9]/g, '');
+        _extRef_dictCache[key] = newCode;
+        log.debug(`  Upgraded duplicate: "${key}" → "${newCode}"`);
+      }
+    });
+
+    _extRef_lastKey = cacheKey;
+  } else {
+    log.debug(`Using cached extRef map for key="${cacheKey}"`);
   }
+
+  // 2. Compute and assign results per row
+  data.forEach((row, idx) => {
+    // 2a. Get extVal
+    const extVal = (row[extCol] || '').toString().trim();
+    // 2b. Pick first non-empty refVal from the prioritized list
+    const refVal = refCols
+      .map(c => (row[c] || '').toString().trim())
+      .find(v => v.length > 0) || '';
+
+    log.debug(`Row ${idx} → extVal="${extVal}", refVal="${refVal}"`);
+
+    // 2c. Determine final result
+    const code = _extRef_dictCache[extVal] || '';
+    let result = '';
+    if (extVal && extVal.toLowerCase() === refVal.toLowerCase()) {
+      result = extVal;
+    }
+    else if (!code && !refVal) {
+      result = '';
+    }
+    else if (!refVal) {
+      result = code;
+    }
+    else if (!code) {
+      result = refVal;
+    }
+    else if (code.replace(/\s+/g, '').toLowerCase() === refVal.replace(/\s+/g, '').toLowerCase()) {
+      result = refVal;
+    }
+    else {
+      result = `${code}-${refVal}`;
+    }
+
+    log.debug(`  → result="${result}"`);
+    row[outCol] = result;
+  });
+
+  return data;
+}
 
 /**
  * Process sheet rows into an array of record objects.
@@ -627,10 +650,14 @@ function processModelOnly(matchedIds, propKeys) {
     // 5.6 Ensure Description
     if (propKeys.includes('Description')) {
       rec['Description'] = el.documentation || '';
-    }
+    }    
 
     output.push(rec);
   });
+
+   // 6. Add ext-Name (or whatever) to every record in one batch
+   log.debug(`Applying extModelHeadersMap to ${output.length} model-only records`);
+   generateExtRef(output, config.extModelHeadersMap); // note: generateExtRef mutates and returns its `data` argument in place
 
   // 6. Output preview of first five
   log.debug(
