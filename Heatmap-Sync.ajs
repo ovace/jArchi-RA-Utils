@@ -16,14 +16,13 @@
   console.log("envPath: " + envPath);
   // any of these now work
   load(libPath + 'loadEnv.ajs').loadEnv(envPath);
-  // const { loadEnv } = require(libPath + 'loadEnv.ajs');
-  // loadEnv(envPath);
-
-  const { log } = load(libPath + 'logger.ajs');
-  // require(libPath +'logger.ajs').log.info("…");
+  const { log } = load(libPath + 'logger.ajs');  
   log.info("global log works");
 
   const utils  = require(libPath + 'common_utils.ajs');
+  const { data2Records } = require(libPath + 'data_utils.ajs');
+  const { loadAndPrepareSheet } = require(libPath +'excelUtils.ajs');
+  const { getModelData,  mapModelDataToRecords, getModelBlankEntries } = require(libPath +'modelUtils.ajs');
   
   const XLSX   = require(libPath + 'xlsx.full.min.js');
 
@@ -71,13 +70,8 @@
     writeCsv,
   } = utils;
 
-//   const { log, 
-//           debug, 
-//           warn, 
-//           error 
-//         } = logger;
 
-  // Configuration  
+// Configuration  
 
   /** @typedef {{
    *    sheetName: string,
@@ -102,25 +96,58 @@
     sheetjsPath:  __DIR__ + '/lib/xlsx.full.min.js',    
     
     excelFilters: [{ name: 'Excel Workbook', extensions: ['xlsm','xlsx'] }],
-    sheetName: 'Function-HeatMap-Final',
+    sheetName: 'Function-HeatMap',
 
     csvFilters:   [{ name: 'CSV File',      extensions: ['csv'] }],
     
     requiredColumns: ['_id','ABB Name','Functional composition','Description','Pri Domain'],
     baseOutputCols:  ['_id','ABB Name','Functional composition', 'ext-Name', 'Description','Pri Domain'],
     flagCols:        ['Taxonomy Classification','Level','nameMatch','descMatch','modelOnly'],
-    extraCols:       ['ID','Type','Grouped_under','inView'],
-
+    extraCols:       ['ID','Type','Grouped_under', 'Grouping_relationshipType','inView'],
+    extModelHeadersMap : {
+        extCol: 'ABB Name',
+        refCol: "Taxonomy Classification",
+        outCol: 'ext-Name'
+        },
     extHeadersMap : {
         extCol: 'ABB Name',
         refCol: "Functional composition",
         outCol: 'ext-Name'
         },
+    modelMap : {        
+        conceptName:          'ABB Name', // which key in the output will hold the element’s name        
+        conceptType:          'Type', // which key will hold the element’s Archi type (e.g. “BusinessActor”, “ApplicationComponent”)         
+        conceptDocument:      'Description', // which key will hold the element’s description
+        conceptID:            'ID', // which key will hold the element’s unique ID        
+        conceptProperties: [
+          'Level',
+          'Taxonomy Classification',
+          'Description',
+          'Version',
+          'Owner',
+          'StandardSolutionExample',  
+          'ExampleUse',
+        ],  // a list of element properties (el.prop('<propKey>')) to include in the output        
+        relationshipTypes: [
+          'composition-relationship',
+          'assignment-relationship',
+          'realization-relationship',
+          'aggregation-relationship',
+          'association-relationship'
+        ]  // for each relationship type name here, we’ll collect outgoing target IDs (joined by commas)        
+       
+      },
+    extModelMap : {
+        extCol: 'Taxonomy Classification',
+        refCol: "ABB Name",
+        outCol: 'ext-Name'
+    },
     relationshipTypes: [
       'association-relationship',
       'aggregation-relationship',
       'composition-relationship'
     ],
+    relTargetTypes : ['grouping','resource'],
     modelProperties: [
       'Level',
       'Taxonomy Classification',
@@ -148,206 +175,143 @@
             key: "Type",
             fn: function(el) { return el && el.type ? el.type : ""; }
         },
+        // {
+        //     key: "Grouped_under",
+        //     fn: function(el, ctx) { return el ? ctx.getGrouping(el, ctx.relTypeIds, config.relTargetTypes) : ""; }
+        // },        
         {
-            key: "Grouped_under",
-            fn: function(el, ctx) { return el ? ctx.getGrouping(el, ctx.relTypeIds) : ""; }
+          key: "Grouped_under",
+          fn: function(el, ctx) {
+            if (!el) return "";
+            const g = ctx.getGrouping(el, ctx.relTypeIds, ctx.relTargetTypes);
+            return g.targetName || "";
+          }
+        },
+        {
+          key: "Grouping_target_id",
+          fn: function(el, ctx) {
+            if (!el) return "";
+            const g = ctx.getGrouping(el, ctx.relTypeIds, ctx.relTargetTypes);
+            return g.targetId || "";
+          }
+        },
+        {
+          key: "Grouping_relationshipType",
+          fn: function(el, ctx) {
+            if (!el) return "";
+            const g = ctx.getGrouping(el, ctx.relTypeIds, ctx.relTargetTypes);
+            return g.relType || "";
+          }
+        },
+        {
+          key: "Grouping_relationshipId",
+          fn: function(el, ctx) {
+            if (!el) return "";
+            const g = ctx.getGrouping(el, ctx.relTypeIds, ctx.relTargetTypes);
+            return g.relId || "";
+          }
         },
         {
             key: "inView",
             fn: function(el, ctx) { return el ? ctx.getElementViews(el) : "Orphan"; }
-        }
-        // Add further computed fields here as needed
-    ],
+        }        
+      ],
     levelMap: {
       '0': { col: 'ABB Name' },
       '1': { col: 'ABB Name' },
       '2': { col: 'Functional composition' }
     },    
     // CSV Options
-    delimiter: ',',
-    newline: '\n',
-    escapeFormulae: true  
+    csvOptions: {
+      delimiter: ',',
+      newline: '\n',
+      escapeFormulae: true  
+    }
+    
   };
 
-  const relTypeIds = config.relationshipTypes;
+  // const relTypeIds = config.relationshipTypes;
   
-  /**
-   * Determine grouping for an element via configured relationship types.
-   * @param {Object} element – Archi element proxy
-   * @param {string[]} relTypes
-   * @returns {string} grouping name, relationship type, or ''
-   */
-  function getGrouping(element, relTypes) {
-    log.debug('getGrouping() for ' + element.id + '/' + element.name);
-    for (let type of relTypes) {
-      const ofType   = $('relationship').filter(r => r.type.toLowerCase() === type).toArray();
-      const relevant = ofType.filter(r => r.source.id === element.id || r.target.id === element.id);
-      log.debug('type=' + type + ', total=' + ofType.length + ', relevant=' + relevant.length);
-      if (relevant.length) {
-        for (let r of relevant) {
-          const other = (r.source.id === element.id ? r.target : r.source);
-          if (other.type.toLowerCase() === 'grouping') {
-            log.debug('grouping found: ' + other.name);
-            return other.name;
-          }
-        }
-        log.debug(' no grouping element; return type ' + type);
-        return type;
-      }
-    }
-    return '';
+/**
+ * Determine a “grouping” relationship for an element.
+ * Scans configured relTypes and relTargetTypes and returns
+ * the first matching target + relationship details.
+ *
+ * @param {IElement}  element         Archi element proxy
+ * @param {string[]}  relTypes        Relationship type names to inspect
+ * @param {string[]}  relTargetTypes  Element type names that qualify as grouping targets
+ * @returns {{
+ *            targetName: string,
+ *            targetId:   string,
+ *            relType:    string,
+ *            relId:      string
+ *          }}
+ */
+function getGrouping(element, relTypes, relTargetTypes) {
+  // Validate
+  if (!element || !element.id) {
+    throw new TypeError('getGrouping(): element must be a valid Archi element');
+  }
+  if (!Array.isArray(relTypes) || !Array.isArray(relTargetTypes)) {
+    throw new TypeError('getGrouping(): relTypes and relTargetTypes must be arrays');
   }
 
-/**
- * Process sheet rows into an array of record objects.
- * Uses buildProperties() for model element data injection.
- *
- * @param {Array|Object}  data       Raw sheet data: 
- *                                   - array of arrays (sheet_to_json header:1) 
- *                                   - array of objects (sheet_to_json header:keys) 
- *                                   - or a single object.
- * @param {Function}      colIdxFn   Maps a column name to either an index (for arrays)
- *                                   or a property key (for objects).
- * @param {Object}        matchedIds Accumulator; we set matchedIds[el.id] = true when we find a model element.
- * @param {string[]}      propKeys   List of all property keys to include in each output record.
- *
- * @returns {Object[]} An array of “record” objects keyed by propKeys.
- */
-function processSpreadsheetRows(data, colIdxFn, matchedIds, propKeys) {
-    // 1. Validate inputs
-    if (typeof colIdxFn !== 'function') {
-        throw new TypeError('colIdxFn must be a function');
-    }
-    if (!Array.isArray(propKeys)) {
-        throw new TypeError('propKeys must be an array of strings');
-    }
+  log.debug(`getGrouping() for element=${element.id}/${element.name}`);
+  log.debug(`Scanning relTypes=${JSON.stringify(relTypes)} for targets=${JSON.stringify(relTargetTypes)}`);
 
-    log.debug('propKeys:', JSON.stringify(propKeys));
-    log.debug('matchedIds (before):', JSON.stringify(matchedIds));
+  // Default empty result
+  const empty = { targetName: '', targetId: '', relType: '', relId: '' };
 
-    // 2. Normalize into [{ row, sheetRow }, …]
-    let normalizedData = [];
+  // Lower-case comparisons
+  const targetTypeSet = new Set(relTargetTypes.map(t => t.toLowerCase()));
 
-    if (Array.isArray(data)) {
-        if (data.length > 0 && typeof data[0] === 'object' && !Array.isArray(data[0])) {
-            // Already an array of objects
-            normalizedData = data.map((rowObj, i) => ({
-                row:      rowObj,
-                sheetRow: i + 1            // adjust if you have header/title rows
-            }));
+  for (let typeName of relTypes) {
+    const typeLower = typeName.toLowerCase();
+    // All relationships of this type
+    const allRels = $('relationship')
+      .filter(r => r.type && r.type.toLowerCase() === typeLower)
+      .toArray();
+    log.debug(`Found ${allRels.length} relationships of type="${typeName}"`);
+
+    // Those involving our element
+    const relevant = allRels.filter(r =>
+      (r.source && r.source.id === element.id) ||
+      (r.target && r.target.id === element.id)
+    );
+    log.debug(`  ${relevant.length} are connected to element`);
+
+    if (relevant.length) {
+      // First, look for a grouping‐target element
+      for (let rel of relevant) {
+        const other = (rel.source.id === element.id ? rel.target : rel.source);
+        const otherType = other.type && other.type.toLowerCase();
+        if (targetTypeSet.has(otherType)) {
+          log.debug(`  Matched target element ${other.name} (type=${other.type}, id=${other.id})`);
+          return {
+            targetName: other.name,
+            targetId:   other.id,
+            relType:    rel.type,
+            relId:      rel.id
+          };
         }
-        else {
-            // Array of arrays → drop first two (title + header), then wrap
-            normalizedData = data
-              .slice(2)
-              .map((rowArr, i) => ({
-                  row:      rowArr,
-                  sheetRow: i + 3          // if slice(2), the first real data row is sheet-row #3
-              }));
-        }
+      }
+      // No grouping‐target, but we did see relationships → return the first rel
+      const rel = relevant[0];
+      const other = (rel.source.id === element.id ? rel.target : rel.source);
+      log.debug(`  No grouping-target; returning relType="${rel.type}", relId="${rel.id}"`);
+      return {
+        targetName: other.name,
+        targetId:   other.id,
+        relType:    rel.type,
+        relId:      rel.id
+      };
     }
-    else if (data !== null && typeof data === 'object') {
-        // Single object → wrap into one-entry array
-        normalizedData = [{ row: data, sheetRow: 1 }];
-    }
-    else {
-        throw new TypeError(`Unsupported data type: ${typeof data}`);
-    }
+  }
 
-    // 3. Debug–print first 3 entries
-    normalizedData.slice(0, 3).forEach(({ row, sheetRow }, idx) => {
-        log.debug(
-            `Sample #${idx} (sheetRow=${sheetRow}): ` +
-            JSON.stringify(row, null, 2)
-        );
-    });
-
-    log.info(`Processing ${normalizedData.length} spreadsheet rows…`);
-
-    // 4. Prepare context for buildProperties
-    const ctx = {
-        getGrouping:    getGrouping,
-        getElementViews: getElementViews,
-        relTypeIds:     relTypeIds
-    };
-
-    // 5. Core loop
-    const output = [];
-    normalizedData.forEach(({ row, sheetRow }, idx) => {
-        log.debug(`[${idx + 1}/${normalizedData.length}] sheetRow=${sheetRow}`);
-
-        // 5.1 Lookup your Archi element by “Functional composition”
-        const fcKey   = 'Functional composition';
-        const fcIndex = colIdxFn(fcKey);
-        const fcRaw   = (row[fcIndex] || '').toString();
-        const fcNorm  = normalize(fcRaw);
-        const el      = $('element')
-                          .filter(e => normalize(e.name) === fcNorm)
-                          .first();
-
-        // 5.2 Build spreadsheetProps
-        const spreadsheetProps = {};
-        propKeys.forEach(k => { spreadsheetProps[k] = ''; });
-        config.baseOutputCols.forEach(col => {
-            const idxKey = colIdxFn(col);
-            spreadsheetProps[col] = row[idxKey] || '';
-        });
-        spreadsheetProps.nameMatch  = '0';
-        spreadsheetProps.descMatch  = '0';
-        spreadsheetProps.modelOnly  = '0';
-
-        // 5.3 If we found a model element, pull in its properties
-        let modelProps = {};
-        if (el) {
-            spreadsheetProps.nameMatch = '1';
-            const docNorm  = normalize(el.documentation || '');
-            const descIdx  = colIdxFn('Description');
-            const descNorm = normalize((row[descIdx] || '').toString());
-            if (docNorm === descNorm) {
-                spreadsheetProps.descMatch = '1';
-            }
-            matchedIds[el.id] = true;
-            modelProps = buildProperties(
-                el,
-                config.modelProperties,
-                config.supplementProperties,
-                ctx
-            );
-        }
-        else {
-            // mark orphans
-            config.supplementProperties.forEach(supp => {
-                if (supp.key === 'inView') {
-                    modelProps[supp.key] = 'Orphan';
-                }
-            });
-        }
-
-        // 5.4 (Optional) collect dynamic values
-        let dynVals = {};
-        // dynVals = collectPropValues(el, propKeys);
-
-        // 5.5 Merge priority: spreadsheet < model < dyn
-        const rec = {};
-        propKeys.forEach(k => { rec[k] = ''; });
-        mergeDynamicProps(rec, spreadsheetProps, propKeys);
-        mergeDynamicProps(rec, modelProps,       propKeys);
-        mergeDynamicProps(rec, dynVals,          propKeys, true);
-
-        // 5.6 Force spreadsheet override on these columns
-        ['Taxonomy Classification','Level'].forEach(col => {
-            if (col in rec) {
-                const idxKey = colIdxFn(col);
-                rec[col] = (row[idxKey] || rec[col] || '').toString();
-            }
-        });
-
-        output.push(rec);
-    });
-
-    return output;
+  // Nothing found
+  log.debug('getGrouping(): no matching relationships or targets found');
+  return empty;
 }
-
 
   /**
    * Generate an “external ↔ reference” code for each row in a data array,
@@ -367,7 +331,7 @@ function processSpreadsheetRows(data, colIdxFn, matchedIds, propKeys) {
 
     // Module‐level caches on outer scope
     if (!_extRef_dictCache || cacheKey !== _extRef_lastKey) {
-      log.debug(`🔄 Rebuilding extRef cache for ${cacheKey}`);
+      log.debug(`Rebuilding extRef cache for ${cacheKey}`);
       _extRef_dictCache    = {};
       _extRef_countMapCache = {};
 
@@ -450,67 +414,234 @@ function processSpreadsheetRows(data, colIdxFn, matchedIds, propKeys) {
     return data;
   }
 
-  //— End of new generateExtRef helper ——
+/**
+ * Process sheet rows into an array of record objects.
+ * Uses buildProperties() for model element data injection.
+ *
+ * @param {Array|Object}  data         Raw sheet data:
+ *                                     - array of arrays (sheet_to_json header:1)
+ *                                     - array of objects (sheet_to_json header:keys)
+ *                                     - or a single object.
+ * @param {Function}      colIdxFn     Maps a column name to either an index (for arrays)
+ *                                     or a property key (for objects).
+ * @param {Object}        matchedIds   Accumulator to mark matched element IDs.
+ * @param {string[]}      propKeys     List of all property keys to include in each output record.
+ * @returns {Object[]}    Array of flattened, merged output records.
+ *
+ * @throws {TypeError} if input types are invalid
+ */
+function processSpreadsheetRows(data, colIdxFn, matchedIds, propKeys) {
+  // 1. Validate inputs
+  if (typeof colIdxFn !== 'function') {
+    throw new TypeError('colIdxFn must be a function');
+  }
+  if (!Array.isArray(propKeys)) {
+    throw new TypeError('propKeys must be an array of strings');
+  }
 
+  log.debug('processSpreadsheetRows(): Starting');
+  log.debug('propKeys:', JSON.stringify(propKeys));
+  log.debug('matchedIds (initial):', JSON.stringify(matchedIds));
+
+  // 2. Normalize raw input using shared utility
+  const normalizedData = data2Records(data, { dropRows: 2, preview: 5 });
+  log.info(`Processing ${normalizedData.length} normalized spreadsheet rows...`);
+
+  // 3. Shared context for buildProperties
+  const ctx = {
+    getGrouping,
+    getElementViews,
+    relTypeIds: config.relationshipTypes,                     // your existing rel-type list
+    relTargetTypes: config.relTargetTypes  // NEW: list of element types to match
+  };
+
+  const output = [];
+
+  normalizedData.forEach(({ row, sheetRow }, idx) => {
+    log.debug(`[${idx + 1}/${normalizedData.length}] sheetRow=${sheetRow}`);
+
+    // 4.1 Lookup Functional composition → match element
+    const fcRaw  = (row['Functional composition'] || '').toString();
+    const fcNorm = normalize(fcRaw);
+    const el     = $('element').filter(e => normalize(e.name) === fcNorm).first();
+
+    // 4.2 Spreadsheet properties
+    const spreadsheetProps = {};
+    propKeys.forEach(k => spreadsheetProps[k] = '');
+
+    config.baseOutputCols.forEach(col => {
+      const val = row[col];
+      spreadsheetProps[col] = (val !== undefined && val !== null) ? val.toString() : '';
+    });
+
+    spreadsheetProps.nameMatch  = '0';
+    spreadsheetProps.descMatch  = '0';
+    spreadsheetProps.modelOnly  = '0';
+
+    // 4.3 Model match
+    let modelProps = {};
+    if (el) {
+      spreadsheetProps.nameMatch = '1';
+
+      const docNorm  = normalize(el.documentation || '');
+      const descNorm = normalize((row['Description'] || '').toString());
+      if (docNorm === descNorm) {
+        spreadsheetProps.descMatch = '1';
+      }
+
+      matchedIds[el.id] = true;
+
+      modelProps = buildProperties(
+        el,
+        config.modelProperties,
+        config.supplementProperties,
+        ctx
+      );
+    } else {
+      config.supplementProperties.forEach(supp => {
+        if (supp.key === 'inView') modelProps[supp.key] = 'Orphan';
+      });
+    }
+
+    // 4.4 Merge hierarchy
+    const dynVals = {}; // optional dynamic props
+
+    const rec = {};
+    propKeys.forEach(k => rec[k] = '');
+    mergeDynamicProps(rec, spreadsheetProps, propKeys);
+    mergeDynamicProps(rec, modelProps,       propKeys);
+    mergeDynamicProps(rec, dynVals,          propKeys, true);
+
+    // 4.5 Forced sheet overrides
+    ['Taxonomy Classification', 'Level'].forEach(col => {
+      if (col in rec) {
+        const val = row[col];
+        rec[col] = (val !== undefined && val !== null) ? val.toString() : rec[col];
+      }
+    });
+
+    output.push(rec);
+  });
+
+  // 5. Log output preview
+  const preview = output.slice(0, 5);
+  log.debug(
+    'processSpreadsheetRows(): Output preview:\n' +
+    preview.map((rec, i) =>
+      `#${i} ${JSON.stringify(rec, null, 2)}`
+    ).join('\n\n')
+  );
+
+  return output;
+}
 
 /**
  * Process model-only elements (not matched in spreadsheet).
  * Returns array of records, one per unmatched model element.
+ *
+ * @param {Object}    matchedIds  Map of element IDs matched to spreadsheet rows
+ * @param {string[]}  propKeys    All property keys expected in output records
+ * @returns {Object[]}            Array of merged record objects
  */
 function processModelOnly(matchedIds, propKeys) {
-    log.info('Processing model-only elements...');
-    let output = [];
-    let count = 0;
-    const ctx = {
-        getGrouping: getGrouping,
-        getElementViews: getElementViews,
-        relTypeIds: relTypeIds
-    };
+  // 1. Validate inputs
+  if (!matchedIds || typeof matchedIds !== 'object') {
+    throw new TypeError('processModelOnly(): matchedIds must be an object');
+  }
+  if (!Array.isArray(propKeys)) {
+    throw new TypeError('processModelOnly(): propKeys must be an array of strings');
+  }
 
-    toJsArray($('element').toArray())
-        .filter(e => !matchedIds[e.id])
-        .forEach((el, idx) => {
-            count++;
-            log.debug(`[ ${count}] Model-only element ${el.id}`);
+  log.info('processModelOnly(): starting extraction of unmatched model elements');
+  log.debug('matchedIds count:', Object.keys(matchedIds).length);
+  log.debug('propKeys:', JSON.stringify(propKeys));
 
-            // 1. Spreadsheet props: modelOnly, nameMatch, etc.
-            let spreadsheetProps = {};
-            propKeys.forEach(key => { spreadsheetProps[key] = ''; });
-            spreadsheetProps['modelOnly'] = '1';
-            spreadsheetProps['nameMatch'] = '0';
-            spreadsheetProps['descMatch'] = '0';
+  // 2. Extract all elements (with blank rows)
+  const allEntries = getModelBlankEntries(propKeys);
 
-            // 2. Model props (from buildProperties)
-            let modelProps = buildProperties(
-                el,
-                config.modelProperties,
-                config.supplementProperties,
-                ctx
-            );
+  // 3. Filter out those already matched
+  const entries = allEntries.filter(({ el }) => !matchedIds[el.id]);
+  log.info(`processModelOnly(): ${entries.length} elements remain after filtering`);
 
-            // 3. Dynamic values (if you use them; optional)
-            let dynVals = collectPropValues(el, propKeys);
+  // Nested helper to place el.name by level
+  function applyNameByLevel(el, rec) {
+    // Determine level (string)
+    const lvl = (el.prop('Level') || '0').toString();
+    // Look up in config.levelMap, default to '0'
+    const mapEntry = config.levelMap[lvl] || config.levelMap['0'];
+    const targetCol = mapEntry.col;
 
-            // 4. Chain merges (spreadsheet < model < dynVals)
-            let rec = {};
-            propKeys.forEach(key => { rec[key] = ''; });
-            mergeDynamicProps(rec, spreadsheetProps, propKeys);
-            mergeDynamicProps(rec, modelProps, propKeys);
-            mergeDynamicProps(rec, dynVals, propKeys, true);
+    // Clear both potential name fields
+    ['ABB Name', 'Functional composition'].forEach(col => {
+      if (propKeys.includes(col)) rec[col] = '';
+    });
 
-            // Place the name in the correct column, clear others
-            const lvl = el.prop('Level') || '0';
-            const mapEntry = config.levelMap[lvl] || config.levelMap['0'];
-            const targetCol = mapEntry.col;
-            if ('ABB Name' in rec) rec['ABB Name'] = '';
-            if ('Functional composition' in rec) rec['Functional composition'] = '';
-            rec[targetCol] = el.name;
-            if ('Description' in rec)   rec['Description']   = el.documentation || '';
+    // Assign el.name to the chosen column
+    if (propKeys.includes(targetCol)) {
+      rec[targetCol] = el.name;
+    } else {
+      log.warn(`applyNameByLevel: target column "${targetCol}" not in propKeys`);
+    }
+  }
 
-            output.push(rec);
-        });
+  // 4. Prepare merge context
+  // 4.1. Shared context for buildProperties
+  const ctx = {
+    getGrouping,
+    getElementViews,
+    relTypeIds: config.relationshipTypes,                     // your existing rel-type list
+    relTargetTypes: config.relTargetTypes  // NEW: list of element types to match
+  };
+  const output = [];
 
-    return output;
+  // 5. Process each unmatched entry
+  entries.forEach(({ el, row, sheetRow }, idx) => {
+    log.debug(`Entry ${idx + 1}/${entries.length} (sheetRow=${sheetRow})`);
+
+    // 5.1 Mark spreadsheet flags
+    row.modelOnly = '1';
+    row.nameMatch = '0';
+    row.descMatch = '0';
+
+    // 5.2 Pull model properties
+    const modelProps = buildProperties(
+      el,
+      config.modelProperties,
+      config.supplementProperties,
+      ctx
+    );
+
+    // 5.3 (Optional) dynamic props
+    const dynVals = collectPropValues(el, propKeys);
+
+    // 5.4 Merge precedence: row < model < dynamic
+    const rec = {};
+    propKeys.forEach(k => { rec[k] = ''; });
+    mergeDynamicProps(rec, row,        propKeys);
+    mergeDynamicProps(rec, modelProps, propKeys);
+    mergeDynamicProps(rec, dynVals,    propKeys, true);
+
+    // 5.5 Place element name by level via nested helper
+    applyNameByLevel(el, rec);
+
+    // 5.6 Ensure Description
+    if (propKeys.includes('Description')) {
+      rec['Description'] = el.documentation || '';
+    }
+
+    output.push(rec);
+  });
+
+  // 6. Output preview of first five
+  log.debug(
+    'processModelOnly(): Output preview (first 5):\n' +
+    output.slice(0, 5)
+      .map((r, i) => `#${i + 1} ${JSON.stringify(r, null, 2)}`)
+      .join('\n\n')
+  );
+
+  log.info('processModelOnly(): complete');
+  return output;
 }
 
 /** Main entry point */
@@ -519,85 +650,26 @@ function processModelOnly(matchedIds, propKeys) {
  * Loads and processes input Excel, writes CSV output, and (optionally) exports model relationship map to Excel.
  */
 function main() {
-    try {
-        
+    try {        
         var model = getActiveModel();
         if (!model) {
             log.warn('No active model. Aborting.');
             return;
         }
-
        
-          log.debug('Diagnostic information...');
+        log.debug('Diagnostic information...');
 
-          log.debug('engineName :' +$.process.engine);
-          log.debug('platform: ' + $.process.platform );
-          log.debug('archi Name: ' + $.process.archiname );
-          log.debug(' archi version : ' + $.process.release.archiVersion);
-          log.debug(' jArchi name: ' + $.process.release.jArchiName);
-          log.debug(' version : ' + $.process.release.jArchiVersion);
+        log.debug('engineName :' +$.process.engine);
+        log.debug('platform: ' + $.process.platform );
+        log.debug('archi Name: ' + $.process.archiname );
+        log.debug(' archi version : ' + $.process.release.archiVersion);
+        log.debug(' jArchi name: ' + $.process.release.jArchiName);
+        log.debug(' version : ' + $.process.release.jArchiVersion);
 
-          log.debug('Active model: ' + model.name);
-          log.debug('Element count: ' + $('element').size());
-          log.debug('Relationship count: ' + $('relationship').size());
-          log.debug('Property count: ' + $('property').size());
-
-          // $('element').forEach(function(e) {
-          //     log.debug('---------------------------------------------');
-          //     log.debug('Element: ' + e.name + ' | type: ' + e.type + ' | id: ' + e.id);
-
-          //     // Outgoing relationships
-          //     var outRels = e.outRels();
-          //     log.debug('Number of outRels: ' + outRels.length);
-          //     outRels.forEach(function(rel) {
-          //         var target = rel.target;
-          //         log.debug('  Outgoing rel type: ' + rel.type +
-          //             ' → target element: ' +
-          //             (target ? (target.name + ' (' + target.type + ')') : '[no target]'));
-          //     });
-
-          //     // Incoming relationships
-          //     var inRels = e.inRels();
-          //     log.debug('Number of inRels: ' + inRels.length);
-          //     inRels.forEach(function(rel) {
-          //         var source = rel.source;
-          //         log.debug('  Incoming rel type: ' + rel.type +
-          //             ' ← source element: ' +
-          //             (source ? (source.name + ' (' + source.type + ')') : '[no source]'));
-          //     });
-          // });
-          // $('element').each(function(e) {
-          //     var outCount = 0;
-          //     $('relationship').each(function(rel) {
-          //         if (rel.source && rel.source.id === e.id) {
-          //             outCount++;
-          //             // Gather info for source, relationship, target
-          //             var sourceName = e.name || '';
-          //             var sourceType = e.type || '';
-          //             var sourceId   = e.id || '';
-          //             var relType    = rel.type || '';
-          //             var relId      = rel.id || '';
-          //             var targetName = rel.target ? (rel.target.name || '') : '';
-          //             var targetType = rel.target ? (rel.target.type || '') : '';
-          //             var targetId   = rel.target ? (rel.target.id   || '') : '';
-
-          //             log.debug(
-          //                 'Source Name: ' + sourceName +
-          //                 ' | Source Type: ' + sourceType +
-          //                 ' | Source ID: ' + sourceId +
-          //                 ' | Relationship Type: ' + relType +
-          //                 ' | Relationship ID: ' + relId +
-          //                 ' | Target Name: ' + targetName +
-          //                 ' | Target Type: ' + targetType +
-          //                 ' | Target ID: ' + targetId
-          //             );
-          //         }
-          //     });
-          //     log.debug('Element: ' + e.name + ' | Outgoing relationships: ' + outCount);
-          // });
-
-        // 0. Validate config
-        // validateConfig();
+        log.debug('Active model: ' + model.name);
+        log.debug('Element count: ' + $('element').size());
+        log.debug('Relationship count: ' + $('relationship').size());
+        log.debug('Property count: ' + $('property').size());          
 
         if (config.getConceptDetails) {
             log.info('Starting Heatmap-Sync execution...');
@@ -612,10 +684,11 @@ function main() {
               // 2. Load Excel, read worksheet
               log.debug('Loading SheetJS from: ' + config.sheetjsPath);
               const wb = XLSX.read(readFileBase64(excelPath), { type: 'base64' });
+              log.debug(`getting Excel Workbook: ${wb} with ${wb.SheetNames.length}  sheets`);
               const sheet = wb.Sheets[config.sheetName];
+              log.debug(`Reading from Excel sheet: ${sheet}`);
               if (!sheet) throw new Error('Sheet "' + config.sheetName + '" not found');
-
-              // ★ OPTION 2: object-based loader ★
+              
               // 2.1 Grab & trim the raw header row (Excel row 1)
               // 1) pull every row as an array...
               const sheetRows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false });
@@ -655,6 +728,14 @@ function main() {
              
               let colIdx = c => headersRow.indexOf(c);
               validateColumns(colIdx, config.requiredColumns);
+              const heatmapdata = data;
+
+
+              // const heatmapdata = loadAndPrepareSheet(excelPath, {
+              //   sheetName:       'Data',
+              //   extHeadersMap:   config.extHeadersMap,
+              //   requiredColumns: config.requiredColumns
+              // });
                         
             
               // 4. Prepare CSV output columns
@@ -674,7 +755,7 @@ function main() {
               // 5. Process spreadsheet and model data
               let matchedIds = {};
               let allRows = [];
-              allRows = allRows.concat(processSpreadsheetRows(data, colIdx, matchedIds, propKeys));
+              allRows = allRows.concat(processSpreadsheetRows(heatmapdata, colIdx, matchedIds, propKeys));
               allRows = allRows.concat(processModelOnly(matchedIds, propKeys));
           
 
