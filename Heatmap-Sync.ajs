@@ -9,6 +9,8 @@
   console.clear();
   console.show();
 
+// #region Load Dependencies  
+
   // Load shared libraries  
   const libPath = __DIR__ + 'lib\\';
   console.log("libPath: " + libPath);
@@ -26,11 +28,13 @@
   
   const XLSX   = require(libPath + 'xlsx.full.min.js');
 
-  // ── Module-level caches for generateExtRef ──
-    var _extRef_dictCache     = null;
-    var _extRef_countMapCache = null;
-    var _extRef_lastKey       = null;
+// #endregion Load Dependencies
 
+// #region Global Variables
+// ── Module-level caches for generateExtRef ──
+  var _extRef_dictCache     = null;
+  var _extRef_countMapCache = null;
+  var _extRef_lastKey       = null;
 
   const { 
     assignRowUUIDs,
@@ -70,8 +74,7 @@
     writeCsv,
   } = utils;
 
-
-// Configuration  
+// #region Configuration  
 
   /** @typedef {{
    *    sheetName: string,
@@ -105,8 +108,8 @@
     flagCols:        ['Taxonomy Classification','Level','nameMatch','descMatch','modelOnly'],
     extraCols:       ['ID','Type','Grouped_under', 'Grouping_relationshipType','inView'],
     extModelHeadersMap : {
-        extCol: 'ABB Name',
-        refCol: "Taxonomy Classification",
+        extCol: 'Taxonomy Classification',
+        refCol: ['Functional composition', 'ABB Name'], 
         outCol: 'ext-Name'
         },
     extHeadersMap : {
@@ -136,12 +139,7 @@
           'association-relationship'
         ]  // for each relationship type name here, we’ll collect outgoing target IDs (joined by commas)        
        
-      },
-    extModelMap : {
-        extCol: 'Taxonomy Classification',
-        refCol: ['Functional composition', 'ABB Name'], 
-        outCol: 'ext-Name'
-    },
+      },    
     relationshipTypes: [
       'association-relationship',
       'aggregation-relationship',
@@ -231,7 +229,11 @@
   };
 
   // const relTypeIds = config.relationshipTypes;
-  
+
+// #endregion Configuration  
+
+// #endregion Global Variables
+
 /**
  * Determine a “grouping” relationship for an element.
  * Scans configured relTypes and relTargetTypes and returns
@@ -821,8 +823,6 @@ function main() {
         window.alert('Script failed: ' + (err && err.message ? err.message : err));
     }
 }
-
-
     log.info('Heatmap-Sync script started.');    
     main();
 })();
