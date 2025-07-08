@@ -1,0 +1,192 @@
+/**
+ * modelFmSheet.ajs
+ *
+ * Reads an Excel sheet of ArchiMate elements and creates or updates corresponding
+ * model elements in the active Archi model using reusable library functions.
+ * Then writes the enriched data (with model element IDs) back to an Excel file.
+ *
+ * For each record, this script:
+ *  1. Loads the Excel file into an object via excelUtils.loadExcelData
+ *  2. Extracts `name`, `type`, and `documentation` per CONFIG.fieldMap
+ *  3. Calls modelUtils.createOrRetrieveConcept({ name, type, documentation, action })
+ *     to create, skip, duplicate, or update the element in the model
+ *  4. Updates the in-memory data object with `model_id` = returned element ID
+ *  5. Saves the enhanced data back to an Excel file via excelUtils.saveDataToExcel
+ *
+ * Includes diagnostics, validation of required headers, and logging at each step.
+ *
+ * Usage (GUI):
+ *   1. Place this script at the project root.
+ *   2. Run via Archi's script runner: `--script.runScript modelFmSheet.ajs`
+ *
+ * Configuration:
+ *   Modify the CONFIG constant below to set file paths, sheet names, headers,
+ *   conceptAction ('skip' | 'duplicate' | 'update'), and outputFile path.
+ */
+
+// -- Library imports
+var { ensureModelLoaded, 
+    createOrRetrieveConcept,  
+    applyPropertiesToModel, 
+    applySpecializationToModel,
+    createViewsFromData } = require(__DIR__ + '/lib/modelUtils.ajs');
+var { loadExcelData, saveDataToExcel } = require(__DIR__ +'/lib/excelUtils.ajs');
+const log     = require(__DIR__ + "/lib/logger.ajs").log;
+
+// -- Script configuration: adjust these as needed
+var CONFIG = {
+  // Absolute path to your Excel file; if invalid or null, you will be prompted
+  excelFilePath: "C:\\myWorkspace\\WS_Archi\\MSA-RA\\MSA-RA-output.xlsx",
+  // Sheet name to process; defaults to the first sheet if not provided
+  sheetName: "output",
+  // Column whose values act as keys for object output (must be in headers)
+  keyHeader: 'uid',
+  // List of headers that must exist in the sheet
+  requiredColumns: ['Name', 'Type', 'Description'],
+  // Map record fields to sheet headers
+  fieldMap: {
+    name: 'Name',
+    type: 'Type',
+    documentation: 'Description'
+  },
+  // Output format from loadExcelData: 'object' or 'array'
+  outputType: 'object',
+  // Action on existing concepts: 'skip' | 'duplicate' | 'update'
+  conceptAction: 'skip',
+  // Path to write the enriched output Excel file; if invalid or null, you will be prompted
+  outputFile: "C:\\myWorkspace\\WS_Archi\\MSA-RA\\MSA-RA-newModel-output.xlsx",
+  // Name for the output sheet
+  outputSheetName: 'ModelElements',
+  propertiesList: [
+    "uid",
+    "_id",
+    "Pri Domain",
+    "Taxonomy Classification",
+    "Level",
+    "modelOnly",
+    "Type",
+    "Grouped_under",
+    "Grouping_relationshipType",
+    "inView",
+    "Version",
+    "Owner",
+    "StandardSolutionExample",
+    "ExampleUse"
+  ],
+  specializationField: "Pri Domain",
+  viewsColumn: "Pri Domain"
+};
+
+/**
+ * Process one record: create/update a concept and attach its ID
+ * @param {Object} rec – One row-record from Excel
+ */
+function processRecord(rec) {
+  var name = rec[CONFIG.fieldMap.name];
+  var type = rec[CONFIG.fieldMap.type];
+  var doc  = rec[CONFIG.fieldMap.documentation];
+
+  log.debug('Processing record → Name: ' + name + ', Type: ' + type);
+
+  if (!name || !type) {
+    log.warn('Skipping record due to missing name or type');
+    return;
+  }
+
+  try {
+    var id = createOrRetrieveConcept({
+      name:          name,
+      type:          type,
+      documentation: doc,
+      action:        CONFIG.conceptAction
+    });
+    log.info('Concept created/updated: [' + type + '] ' + name + ' → id=' + id);
+    rec.model_id = id;
+  }
+  catch (e) {
+    log.error('Error creating/updating concept for ' + name + ' – ' + e);
+  }
+}
+
+/**
+ * Main entrypoint: load Excel, process each record, update model, and save results.
+ * @returns {Object|Array<Object>} The updated data object/array with model_id fields
+ */
+function main() {
+  // Initialize console
+  console.clear();
+  console.show();
+
+  log.info('modelFmSheet: Starting script');
+
+  // Ensure there is an active model (prompts if not)
+  var model = ensureModelLoaded();
+  log.debug('Active model: ' + (model.name || model.id));
+
+  try {
+    // Load data from Excel into JS object or array
+    var data = loadExcelData({
+      filePath:        CONFIG.excelFilePath,
+      sheetName:       CONFIG.sheetName,
+      keyHeader:       CONFIG.keyHeader,
+      outputType:      CONFIG.outputType,
+      requiredHeaders: CONFIG.requiredColumns
+    });
+
+    var count = (CONFIG.outputType === 'array')
+              ? data.length
+              : Object.keys(data).length;
+    log.info('Loaded ' + count + ' records from Excel');
+
+    // Process records
+    if (CONFIG.outputType === 'array') {
+      data.forEach(processRecord);
+    } else {
+      Object.keys(data).forEach(function(key) {
+        processRecord(data[key]);
+      });
+    }
+
+    try {
+        log.info("Applying custom properties to model elements…");
+        applyPropertiesToModel(data, CONFIG.propertiesList);
+
+        // log.info("Applying specialization to model elements…");
+        // applySpecializationToModel(data, CONFIG.specializationField);
+        }
+    catch (e) {
+        log.error(`Error while annotating model elements: ${e.message || e}`);
+    throw e;
+        }
+    
+    try {
+        log.info("Generating views from domain data…");
+        createViewsFromData(data, CONFIG.viewsColumn);
+        }
+    catch (err) {
+        log.error(`Failed to create views: ${err.message || err}`);
+    throw err;
+}
+
+    log.info('modelFmSheet: Completed processing all records');
+
+    // Save enriched data back to Excel
+    saveDataToExcel({
+      data:       data,
+      outputFile: CONFIG.outputFile,
+      sheetName:  CONFIG.outputSheetName
+    });
+    log.info('modelFmSheet: Output saved to Excel file');
+
+    return data;
+  }
+  catch (err) {
+    log.error('modelFmSheet: Fatal error – ' + err);
+    throw err;
+  }
+}
+
+
+
+// Execute script
+main();
