@@ -48,6 +48,7 @@ const log     = require(__DIR__ + "/lib/logger.ajs").log;
 var CONFIG = {
   createElements: true,
   createRels: true,  
+  createViews: true,
   File:{
     cacheDataType: 'array',  // Output format from loadExcelData: 'object' or 'array'  
     input: {
@@ -180,13 +181,15 @@ function processRecord(rec) {
  * 7. Saves the enriched mapping back to Excel
  */
 function main() {
+
+  let data;
   try {
     log.info("▶ modelFmSheet starting…");
 
     if (CONFIG.createElements) {
     
         // STEP 1: Load Excel data in the chosen format
-        let data = loadExcelData({
+        data = loadExcelData({
           filePath:        CONFIG.File.input.concepts.excelFilePath,
           sheetName:       CONFIG.File.input.concepts.sheetName,
           keyHeader:       CONFIG.File.input.concepts.keyHeader,
@@ -268,10 +271,8 @@ function main() {
           applySpecializationToElement(elem, spec);
         });
 
-        // STEP 6: Create and populate views from domain column
-        log.info(`Creating views from "${CONFIG.viewsColumn}"...`);
-        createViewsFromData(data, CONFIG.viewsColumn);
-
+        // STEP 6a: Lookup and extend - identify the relTargetId for each record relationship
+        log.info(`Lookup and extend...`);
         data = lookupAndExtend(
           data,
           CONFIG.rels_xLookup.lookupField,
@@ -281,7 +282,7 @@ function main() {
           { defaultValue: CONFIG.rels_xLookup.defaultValue }
         );
 
-        // STEP 7: Write the enriched data (with model_id) back to Excel
+        // STEP 7: Write the enriched data (with relTargetId) back to Excel
         log.info("Saving mapping back to Excel...");
         saveDataToExcel({
           data:       data,
@@ -294,9 +295,8 @@ function main() {
       if (CONFIG.createRels) {
         window.alert(
                 "prepare the relationships sheet before proceeding!\n"  );
-        // ────────────────────────────────────────────────────────────────────────────────
-        // STEP X: Load and validate relationship definitions from Excel
-        // ────────────────────────────────────────────────────────────────────────────────
+        
+        // STEP Z: Load and validate relationship definitions from Excel
         let relData;
         try {
           log.info("Loading relationship definitions from Excel…");
@@ -320,9 +320,8 @@ function main() {
           throw e;
         }
 
-        // ────────────────────────────────────────────────────────────────────────────────
+        
         // STEP Y: Create grouping relationships based on loaded data
-        // ────────────────────────────────────────────────────────────────────────────────
         try {
           log.info("Applying grouping relationships…");
           applyGroupingRelationships(relData, CONFIG.grouping);
@@ -334,6 +333,18 @@ function main() {
         }
       }
 
+      // STEP X: Create and populate views from domain column
+      if (CONFIG.createViews) {
+        try {         
+          log.info(`Creating views from "${CONFIG.viewsColumn}"...`);
+          createViewsFromData(data, CONFIG.viewsColumn);
+        }      
+        catch (e) {
+          log.error(`Error wwhile creating views from pri domains: ${e.message || e}`);
+          throw e;
+        }
+      }
+    
     log.info("modelFmSheet completed successfully");
   }
   catch (err) {
