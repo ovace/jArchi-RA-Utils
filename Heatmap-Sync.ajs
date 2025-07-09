@@ -17,12 +17,12 @@
   const envPath = __DIR__+".env";
   console.log("envPath: " + envPath);
   // any of these now work
-  load(libPath + 'loadEnv.ajs').loadEnv(envPath);
-  const { log } = load(libPath + 'logger.ajs');  
+  const env = require(libPath + 'loadEnv.ajs').loadEnv(envPath);
+  const { log } = require(libPath + 'logger.ajs');  
   log.info("global log works");
 
-  const utils  = require(libPath + 'common_utils.ajs');
-  const { data2Records } = require(libPath + 'data_utils.ajs');
+  const utils  = require(libPath + 'commonUtils.ajs');
+  const { data2Records } = require(libPath + 'dataUtils.ajs');
   const { loadAndPrepareSheet } = require(libPath +'excelUtils.ajs');
   const { getModelData,  mapModelDataToRecords, getModelBlankEntries } = require(libPath +'modelUtils.ajs');
   

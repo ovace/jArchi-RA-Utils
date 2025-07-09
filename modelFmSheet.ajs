@@ -24,39 +24,79 @@
  *   conceptAction ('skip' | 'duplicate' | 'update'), and outputFile path.
  */
 
+// Refresh the Archi console
+console.clear();
+console.show();
 // -- Library imports
-var { ensureModelLoaded, 
+var { 
+    ensureModelLoaded, 
     createOrRetrieveConcept,  
-    applyPropertiesToModel, 
-    applySpecializationToModel,
-    createViewsFromData } = require(__DIR__ + '/lib/modelUtils.ajs');
-var { loadExcelData, saveDataToExcel } = require(__DIR__ +'/lib/excelUtils.ajs');
+    applyPropertiesToModel,     
+    createViewsFromData,
+    applySpecializationToElement,
+    importSpecializationsFromData,
+    applyGroupingRelationships
+    } = require(__DIR__ + '/lib/modelUtils.ajs');
+var { 
+  loadExcelData, 
+  saveDataToExcel  
+  } = require(__DIR__ +'/lib/excelUtils.ajs');
+var { lookupAndExtend } = require(__DIR__ + '/lib/commonUtils.ajs');
 const log     = require(__DIR__ + "/lib/logger.ajs").log;
 
 // -- Script configuration: adjust these as needed
 var CONFIG = {
-  // Absolute path to your Excel file; if invalid or null, you will be prompted
-  excelFilePath: "C:\\myWorkspace\\WS_Archi\\MSA-RA\\MSA-RA-output.xlsx",
-  // Sheet name to process; defaults to the first sheet if not provided
-  sheetName: "output",
-  // Column whose values act as keys for object output (must be in headers)
-  keyHeader: 'uid',
-  // List of headers that must exist in the sheet
-  requiredColumns: ['Name', 'Type', 'Description'],
-  // Map record fields to sheet headers
+  createElements: true,
+  createRels: true,  
+  File:{
+    cacheDataType: 'array',  // Output format from loadExcelData: 'object' or 'array'  
+    input: {
+      concepts: {
+        excelFilePath: "C:\\myWorkspace\\WS_Archi\\MSA-RA\\MSA-RA-newModel-output-wip-full.xlsx", // Absolute path to your Excel file; if invalid or null, you will be prompted  
+        sheetName: "ModelElements",  // Sheet name to process; defaults to the first sheet if not provided  
+        keyHeader: 'uid', // Column whose values act as keys for object output (must be in headers)  
+        requiredColumns: ['Name', 'Type', 'Description'], // List of required headers// List of headers that must exist in the sheet
+      },
+      relationships: {
+        excelFilePath: "C:\\myWorkspace\\WS_Archi\\MSA-RA\\MSA-RA-newModel-output.xlsx", // Absolute path to your Excel file; if invalid or null, you will be prompted  
+        sheetName: "ModelElements",  // Sheet name to process; defaults to the first sheet if not provided     
+        keyHeader: 'uid', // Column whose values act as keys for object output (must be in headers)   
+        requiredColumns: ["Grouped_under","Grouping_relationshipType","model_id","relTargetId"], // List of required headers// List of headers that must exist in the sheet
+      }
+    },
+    output:{
+      Path : "C:\\myWorkspace\\WS_Archi\\MSA-RA\\MSA-RA-newModel-output.xlsx", // Path to write the enriched output Excel file; if invalid or null, you will be prompted
+      SheetName: 'ModelElements', // Name for the output sheet
+      Headers: [
+        "uid",
+        "_id",
+        "Name",
+        "Description",
+        "Pri Domain",
+        "Taxonomy Classification",
+        "Level",
+        "modelOnly",
+        "Type",
+        "Grouped_under",
+        "Grouping_relationshipType",
+        "inView",
+        "Version",
+        "Owner",
+        "StandardSolutionExample",
+        "ExampleUse",
+        "model_id",
+        "relTargetId"
+      ]
+    },
+  },
   fieldMap: {
     name: 'Name',
     type: 'Type',
     documentation: 'Description'
-  },
-  // Output format from loadExcelData: 'object' or 'array'
-  outputType: 'object',
-  // Action on existing concepts: 'skip' | 'duplicate' | 'update'
-  conceptAction: 'skip',
-  // Path to write the enriched output Excel file; if invalid or null, you will be prompted
-  outputFile: "C:\\myWorkspace\\WS_Archi\\MSA-RA\\MSA-RA-newModel-output.xlsx",
-  // Name for the output sheet
-  outputSheetName: 'ModelElements',
+  },  // Map record fields to sheet headers
+  
+  conceptAction: 'update',    // Action on existing concepts: 'skip' | 'duplicate' | 'update'
+  
   propertiesList: [
     "uid",
     "_id",
@@ -73,8 +113,28 @@ var CONFIG = {
     "StandardSolutionExample",
     "ExampleUse"
   ],
-  specializationField: "Pri Domain",
-  viewsColumn: "Pri Domain"
+  specialization : {
+    Field: "Pri Domain",
+    Type: "Type"
+    },
+  viewsColumn: "Pri Domain",
+  grouping : {
+    Field: "Grouped_under", // column name
+    Relationship: {      
+      Type: "Grouping_relationshipType", // column name
+      default: "AssociationRelationship", // string
+      sourceElemtn: "model_id",  // column name for the souce element ids
+      targetElement: "relTargetId"  // column name for the target element ids
+    } 
+  },
+  rels_xLookup: {
+    lookupField:  "Grouped_under",
+    matchField:   "Name",
+    returnField:  "model_id",
+    outputField:  "relTargetId",
+    defaultValue: ""
+  }
+
 };
 
 /**
@@ -109,84 +169,177 @@ function processRecord(rec) {
 }
 
 /**
- * Main entrypoint: load Excel, process each record, update model, and save results.
- * @returns {Object|Array<Object>} The updated data object/array with model_id fields
+ * Main entry point for modelFmSheet.ajs
+ *
+ * 1. Loads Excel data (object or array) per CONFIG.outputType
+ * 2. Ensures an Archi model is loaded
+ * 3. Creates or updates ArchiMate concepts
+ * 4. Applies custom properties
+ * 5. Ensures + applies specializations
+ * 6. Generates views by domain
+ * 7. Saves the enriched mapping back to Excel
  */
 function main() {
-  // Initialize console
-  console.clear();
-  console.show();
-
-  log.info('modelFmSheet: Starting script');
-
-  // Ensure there is an active model (prompts if not)
-  var model = ensureModelLoaded();
-  log.debug('Active model: ' + (model.name || model.id));
-
   try {
-    // Load data from Excel into JS object or array
-    var data = loadExcelData({
-      filePath:        CONFIG.excelFilePath,
-      sheetName:       CONFIG.sheetName,
-      keyHeader:       CONFIG.keyHeader,
-      outputType:      CONFIG.outputType,
-      requiredHeaders: CONFIG.requiredColumns
-    });
+    log.info("▶ modelFmSheet starting…");
 
-    var count = (CONFIG.outputType === 'array')
-              ? data.length
-              : Object.keys(data).length;
-    log.info('Loaded ' + count + ' records from Excel');
+    if (CONFIG.createElements) {
+    
+        // STEP 1: Load Excel data in the chosen format
+        let data = loadExcelData({
+          filePath:        CONFIG.File.input.concepts.excelFilePath,
+          sheetName:       CONFIG.File.input.concepts.sheetName,
+          keyHeader:       CONFIG.File.input.concepts.keyHeader,
+          outputType:      CONFIG.File.cacheDataType,
+          requiredHeaders: CONFIG.File.input.concepts.requiredColumns
+        });
+        // Report row/record count
+        if (CONFIG.File.cacheDataType === "array") {
+          log.info(`Loaded ${data.length} rows from Excel`);
+        }
+        else {
+          log.info(`Loaded ${Object.keys(data).length} records from Excel`);
+        }
 
-    // Process records
-    if (CONFIG.outputType === 'array') {
-      data.forEach(processRecord);
-    } else {
-      Object.keys(data).forEach(function(key) {
-        processRecord(data[key]);
-      });
-    }
+        // Helper to iterate uniformly over data
+        const iterate = CONFIG.File.cacheDataType === "array"
+          ? fn => data.forEach(fn)
+          : fn => Object.values(data).forEach(fn);
 
-    try {
-        log.info("Applying custom properties to model elements…");
+        // STEP 2: Ensure a model is active
+        const model = ensureModelLoaded();
+        log.debug(`Model loaded: ${model.name || model.id}`);
+
+        // STEP 3: Create or update each concept, store its ID
+        log.info("Processing concepts (create/update)...");
+        iterate((rec, idx) => {
+          const rowLabel = CONFIG.File.cacheDataType === "array" ? `row ${idx+1}` : `key "${idx}"`;
+          
+          // Pull actual values from this record using your fieldMap
+          const nameKey = CONFIG.fieldMap.name;
+          const typeKey = CONFIG.fieldMap.type;
+          const docKey  = CONFIG.fieldMap.documentation;
+
+          const name          = rec[nameKey];
+          const type          = rec[typeKey];
+          const documentation = rec[docKey];
+
+          // Validate before calling the API
+          if (!name || !type) {
+            log.warn(`row ${idx+1}: missing "${nameKey}" or "${typeKey}", skipping`);
+            return;
+          }
+
+          try {
+            const id = createOrRetrieveConcept({
+              name,
+              type,
+              documentation,
+              action: CONFIG.conceptAction
+            });
+            rec.model_id = id;
+            log.debug(`[${type}] "${name}" → ID=${id}`);
+          }
+          catch (err) {
+            log.error(`row ${idx+1}: failed to create/update "${name}": ${err.message||err}`);
+            throw err;
+          }
+        });
+
+        // STEP 4: Apply custom properties in bulk
+        log.info("Applying element properties...");
         applyPropertiesToModel(data, CONFIG.propertiesList);
 
-        // log.info("Applying specialization to model elements…");
-        // applySpecializationToModel(data, CONFIG.specializationField);
-        }
-    catch (e) {
-        log.error(`Error while annotating model elements: ${e.message || e}`);
-    throw e;
-        }
-    
-    try {
-        log.info("Generating views from domain data…");
+        // After loading `data` and before `applySpecializationToElement` steps:
+        importSpecializationsFromData(data, CONFIG.specialization.Type, CONFIG.specialization.Field);
+
+        // STEP 5: Ensure & apply specializations per element
+        log.info("Applying specializations...");
+        iterate(rec => {
+          const spec = rec[CONFIG.specializationField];
+          if (!rec.model_id || !spec) return;
+
+          // jArchi lookup by ID via jQuery selector
+          const elem = $(`#${rec.model_id}`).first();
+          if (!elem) {
+            log.warn(`Element ID=${rec.model_id} not found, skipping specialization`);
+            return;
+          }
+          applySpecializationToElement(elem, spec);
+        });
+
+        // STEP 6: Create and populate views from domain column
+        log.info(`Creating views from "${CONFIG.viewsColumn}"...`);
         createViewsFromData(data, CONFIG.viewsColumn);
+
+        data = lookupAndExtend(
+          data,
+          CONFIG.rels_xLookup.lookupField,
+          CONFIG.rels_xLookup.matchField,
+          CONFIG.rels_xLookup.returnField,
+          CONFIG.rels_xLookup.outputField,
+          { defaultValue: CONFIG.rels_xLookup.defaultValue }
+        );
+
+        // STEP 7: Write the enriched data (with model_id) back to Excel
+        log.info("Saving mapping back to Excel...");
+        saveDataToExcel({
+          data:       data,
+          outputFile: CONFIG.File.output.Path,
+          sheetName:  CONFIG.File.output.SheetName,  // omit or undefined to use default
+          headers:    CONFIG.File.output.Headers
+        });
+      }
+
+      if (CONFIG.createRels) {
+        window.alert(
+                "prepare the relationships sheet before proceeding!\n"  );
+        // ────────────────────────────────────────────────────────────────────────────────
+        // STEP X: Load and validate relationship definitions from Excel
+        // ────────────────────────────────────────────────────────────────────────────────
+        let relData;
+        try {
+          log.info("Loading relationship definitions from Excel…");
+          relData = loadExcelData({
+            filePath:        CONFIG.File.input.relationships.excelFilePath,
+            sheetName:       CONFIG.File.input.relationships.sheetName,
+            keyHeader:       CONFIG.File.input.relationships.keyHeader,
+            outputType:      CONFIG.File.cacheDataType,
+            requiredHeaders: CONFIG.File.input.relationships.requiredColumns
+          });
+          // Report row/record count
+          if (CONFIG.File.cacheDataType === "array") {
+            log.info(`Loaded ${relData.length} rows of relationship records from Excel`);
+          }
+          else {
+            log.info(`Loaded ${Object.keys(relData).length} relationship records from Excel`);
+          }
         }
-    catch (err) {
-        log.error(`Failed to create views: ${err.message || err}`);
-    throw err;
-}
+        catch (e) {
+          log.error(`Failed to load relationship definitions: ${e.message || e}`);
+          throw e;
+        }
 
-    log.info('modelFmSheet: Completed processing all records');
+        // ────────────────────────────────────────────────────────────────────────────────
+        // STEP Y: Create grouping relationships based on loaded data
+        // ────────────────────────────────────────────────────────────────────────────────
+        try {
+          log.info("Applying grouping relationships…");
+          applyGroupingRelationships(relData, CONFIG.grouping);
+          log.info("Grouping relationships applied successfully");
+        }      
+        catch (e) {
+          log.error(`Error while applying grouping relationships: ${e.message || e}`);
+          throw e;
+        }
+      }
 
-    // Save enriched data back to Excel
-    saveDataToExcel({
-      data:       data,
-      outputFile: CONFIG.outputFile,
-      sheetName:  CONFIG.outputSheetName
-    });
-    log.info('modelFmSheet: Output saved to Excel file');
-
-    return data;
+    log.info("modelFmSheet completed successfully");
   }
   catch (err) {
-    log.error('modelFmSheet: Fatal error – ' + err);
+    log.error(`modelFmSheet: Fatal error – ${err.message || err}`);
     throw err;
   }
 }
 
-
-
-// Execute script
 main();

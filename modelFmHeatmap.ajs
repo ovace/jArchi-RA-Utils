@@ -16,7 +16,7 @@
 
 // Load shared libraries from ./lib
   const libPath = __DIR__ + 'lib\\';
-  const utils  = require(libPath + 'common_utils.ajs');
+  const utils  = require(libPath + 'commonUtils.ajs');
   const logger = require(libPath + 'logger.ajs');
 
   const { readCSV,
