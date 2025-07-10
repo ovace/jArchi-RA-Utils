@@ -39,6 +39,7 @@ var {
     } = require(__DIR__ + '/lib/modelUtils.ajs');
 var { 
   loadExcelData, 
+  filterDataNyConfigMap,
   saveDataToExcel  
   } = require(__DIR__ +'/lib/excelUtils.ajs');
 var { lookupAndExtend } = require(__DIR__ + '/lib/commonUtils.ajs');
@@ -134,6 +135,16 @@ var CONFIG = {
     returnField:  "model_id",
     outputField:  "relTargetId",
     defaultValue: ""
+  },
+  filterMap: {
+    "ColumnHeader1": {
+      "Foo*": "IN",
+      "?Bar": "OUT",
+      "Baz": "IN"
+    },
+    "ColumnHeader2": {
+      "202?-##": "OUT"
+    }
   }
 
 };
