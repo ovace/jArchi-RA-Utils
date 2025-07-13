@@ -1,0 +1,487 @@
+/**
+ * informationMapExporter.ajs
+ *
+ * Exports arbitrary element information to Excel based on an “informationMap”
+ * defined in .env. Prompts for model (if none active / in config) and output
+ * file (if not in config), loads all model data into a cache, runs diagnostics,
+ * then transforms and writes out per‐element records.
+ *
+ * Usage: Run in jArchi (Script → Run Script…).
+ */
+
+// ── 1. Console setup ─────────────────────────────────────────────────────────
+console.clear();
+console.show();
+
+// ── 2. Load ENV and libs ────────────────────────────────────────────────────
+const libDir  = __DIR__ + 'lib/';
+console.log(`libDir: ${libDir}`);
+const envPath = __DIR__ + '.env';
+console.log(`envPath: ${envPath}`);
+const CONFIG  = require(libDir + 'loadEnv.ajs').loadEnv(envPath);
+
+const { log } = require(libDir + 'logger.ajs');
+const common   = require(libDir + 'commonUtils.ajs');
+const toJsArray = common.toJsArray;
+
+const {
+  promptForModel,
+  getActiveModel,
+  ensureModelLoaded,
+  getElementViews,
+  conceptRelationshipMap
+} = require(libDir + 'modelUtils.ajs');
+
+const { saveDataToExcel } = require(libDir + 'fileUtils.ajs');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [1] Parse JSON or JS object literal from string or value
+// ─────────────────────────────────────────────────────────────────────────────
+function parseJsonOrObject(input) {
+  log.debug(`[parseJsonOrObject] Received input of type: ${typeof input}`);
+
+  if (input && typeof input === 'object') {
+    log.debug('[parseJsonOrObject] Input is already an object, returning as-is');
+    return input;
+  }
+
+  let str = String(input || '').trim();
+  if (!str) {
+    log.error('[parseJsonOrObject] Input string is empty after trimming');
+    throw new Error('Empty input for JSON parse');
+  }
+
+  if (str.startsWith('{') && !str.endsWith('}')) {
+    const last = str.lastIndexOf('}');
+    log.warn('[parseJsonOrObject] Detected partial JSON; truncating at last closing brace');
+    str = str.substring(0, last + 1);
+  }
+
+  try {
+    const parsed = JSON.parse(str);
+    log.debug('[parseJsonOrObject] Parsed successfully with JSON.parse()');
+    return parsed;
+  } catch (e1) {
+    log.warn(`[parseJsonOrObject] JSON.parse failed: ${e1.message}`);
+    try {
+      const parsedEval = eval('(' + str + ')');
+      log.debug('[parseJsonOrObject] Parsed successfully with eval() fallback');
+      return parsedEval;
+    } catch (e2) {
+      log.error(`[parseJsonOrObject] FATAL: eval parse failed → ${e2.message}`);
+      throw e2;
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [2] Read a multi-line object block from a .env file by key
+// ─────────────────────────────────────────────────────────────────────────────
+function readEnvBlock(key) {
+  log.debug(`[readEnvBlock] Attempting to extract block for key: "${key}"`);
+
+  try {
+    const Files  = Java.type('java.nio.file.Files');
+    const Paths  = Java.type('java.nio.file.Paths');
+    const bytes  = Files.readAllBytes(Paths.get(envPath));
+    const content= new java.lang.String(bytes, 'UTF-8');
+
+    log.debug(`[readEnvBlock] Read ${bytes.length} bytes from .env`);
+    const regex  = new RegExp(key + '\\s*=\\s*({[\\s\\S]*?})', 'm');
+    const match  = regex.exec(content);
+
+    if (!match) {
+      log.warn(`[readEnvBlock] No match found for key "${key}"`);
+      return null;
+    }
+
+    log.debug(`[readEnvBlock] Block extracted successfully for key "${key}"`);
+    return match[1];
+  } catch (e) {
+    log.error(`[readEnvBlock] Failed to read .env: ${e.message}`);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [3] Parse CONFIG.informationMap from string, with .env fallback
+// ─────────────────────────────────────────────────────────────────────────────
+function parseInformationMap(raw) {
+  log.debug('[parseInformationMap] Starting parse of informationMap');
+
+  if (typeof raw === 'string' && !raw.trim().endsWith('}')) {
+    log.warn('[parseInformationMap] Truncated JSON block detected. Attempting recovery.');
+    const fullBlock = readEnvBlock('informationMap');
+    if (fullBlock) {
+      log.debug('[parseInformationMap] Recovered full JSON from .env file');
+      raw = fullBlock;
+    } else {
+      log.warn('[parseInformationMap] Recovery failed. Proceeding with original.');
+    }
+  }
+
+  if (!raw) {
+    log.error('[parseInformationMap] No value provided for informationMap');
+    throw new Error('informationMap is required');
+  }
+
+  const map = parseJsonOrObject(raw);
+  if (typeof map !== 'object' || Array.isArray(map)) {
+    log.error('[parseInformationMap] Result is not a valid JSON object');
+    throw new Error('Invalid informationMap: must be an object');
+  }
+
+  log.debug(`[parseInformationMap] Successfully parsed with ${Object.keys(map).length} keys`);
+  return map;
+}
+
+// ── 3b. Load and parse the informationMap from CONFIG ───────────────────────
+const informationMap = parseInformationMap(CONFIG.informationMap);
+log.info(`[informationMapExporter] Loaded informationMap with keys: ${Object.keys(informationMap).join(', ')}`);
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [4] Parse a spec string into its source and optional filter map
+// ─────────────────────────────────────────────────────────────────────────────
+function parseSpec(specString) {
+  log.debug(`[parseSpec] Parsing spec string: "${specString}"`);
+
+  const parts = specString.split(/\s+where\s+/i);
+  const source = parts[0].trim();
+  const filterMap = {};
+
+  if (parts[1]) {
+    const raw = parts[1].trim().replace(/^\{|\}$/g, '');
+    log.debug(`[parseSpec] Raw filter block: ${raw}`);
+
+    raw.split(/\s*,\s*/).forEach(cond => {
+      const [k, v] = cond.split('=').map(s => s.trim());
+      try {
+        filterMap[k] = eval(v);  // e.g., ["app-service","function"]
+        log.debug(`[parseSpec] Parsed filter: ${k} → ${JSON.stringify(filterMap[k])}`);
+      } catch (e) {
+        log.error(`[parseSpec] Failed parsing filter for "${k}": ${e.message}`);
+        filterMap[k] = [];
+      }
+    });
+  }
+
+  const sourceParts = source.split('.').map(s => s.trim());
+  log.debug(`[parseSpec] Parsed sourceParts: ${JSON.stringify(sourceParts)}`);
+
+  return { source, sourceParts, filterMap };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [5] Deeply resolve a value from a path of keys (safe reducer)
+// ─────────────────────────────────────────────────────────────────────────────
+function getValueByPath(ctx, pathParts) {
+  return pathParts.reduce((o, key, i) => {
+    const val = (o && o[key] != null) ? o[key] : null;
+    if (val === null && o !== null) {
+      log.debug(`[getValueByPath] Key "${key}" not found at step ${i}`);
+    }
+    return val;
+  }, ctx);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [6] Evaluate a spec on an enriched element
+// ─────────────────────────────────────────────────────────────────────────────
+// ── Spec evaluator with proper “target.name” / “target.type” support ────────
+function evaluateSpec(spec, El) {
+  // Trim whitespace and normalize redundant “element.relationship”
+  const sp = spec.sourceParts.map(p => p.trim());
+  log.debug(`[evaluateSpec] ${El.id} ← spec ${JSON.stringify(sp)}`);
+  if (sp[0]==='element' && sp[1]==='relationship') sp.shift();
+
+  // — Element-level fields & filters —
+  if (sp[0]==='element') {
+    // Filters
+    for (let fk in spec.filterMap) {
+      const val = getValueByPath({ element: El, property: El.Pmap }, fk.split('.'));
+      log.debug(`  • filter ${fk} → ${val}`);
+      if (!spec.filterMap[fk].includes(val)) {
+        log.debug(`    ↳ filtered out by ${fk}`);
+        return null;
+      }
+    }
+    // Property
+    if (sp[1]==='property') {
+      const out = El.Pmap[sp[2]] ?? null;
+      log.debug(`  • property ${sp[2]} → ${out}`);
+      return out;
+    }
+    // inView
+    if (sp[1]==='inView') {
+      const vs = (El.V||[]).map(v=>v.name);
+      log.debug(`  • inView → [${vs.join(',')}]`);
+      return vs;
+    }
+    // Direct field
+    const fld = El[sp[1]] ?? null;
+    log.debug(`  • element.${sp[1]} → ${fld}`);
+    return fld;
+  }
+
+  // — Relationship fields —
+  if (sp[0]==='relationship' && (sp[1]==='out' || sp[1]==='in')) {
+    const dir    = sp[1];
+    const rels   = (dir==='out' ? El.Ro : El.Ri) || [];
+    log.debug(`  • found ${rels.length} ${dir}-going rels`);
+
+    // Apply filters (none for your specs)
+    const filt = rels.filter(r => {
+      for (let fk in spec.filterMap) {
+        const fp = fk.split('.');
+        const val = fp[0]==='target'
+          ? getValueByPath({ target: { type: r.targetType, name: r.targetName } }, fp)
+          : getValueByPath({ relationship: r }, fp);
+        if (!spec.filterMap[fk].includes(val)) return false;
+      }
+      return true;
+    });
+    log.debug(`  • ${filt.length} after filters`);
+
+    // target.name / target.type (sp = ['relationship','out','target','name'])
+    if (sp[2]==='target' && sp[3]) {
+      const sub = sp[3];
+      const out = filt.map(r => {
+        if (sub==='name') return r.targetName;
+        if (sub==='type') return r.targetType;
+        return null;
+      });
+      log.debug(`  • target.${sub} → [${out.join(',')}]`);
+      return out;
+    }
+
+    // shorthand targetName / targetType
+    if (sp[2]==='targetName' || sp[2]==='targetType') {
+      const key = sp[2];
+      const out = filt.map(r => r[key]);
+      log.debug(`  • ${key} → [${out.join(',')}]`);
+      return out;
+    }
+
+    // direct rel property (e.g. 'type')
+    const prop = sp[2];
+    const out  = filt.map(r => r[prop] ?? null);
+    log.debug(`  • rel.${prop} → [${out.join(',')}]`);
+    return out;
+  }
+
+  log.warn(`[evaluateSpec] Unsupported source: ${spec.source}`);
+  return null;
+}
+
+// ── [7] Case-insensitive property mapper ─────────────────────────────────────
+/// ── Case-insensitive property mapper ──────────────────────────────────────────
+function buildPropMap(el, propertyKeys) {
+  log.debug(`[buildPropMap] Building property map for element ${el.id}`);
+  const map = {};
+
+  propertyKeys.forEach(key => {
+    // 1) try exact
+    let val = el.prop(key);
+    log.debug(`  • el.prop("${key}") → ${val}`);
+
+    // 2) try lowercase
+    if (val == null) {
+      const lower = key.toLowerCase();
+      val = el.prop(lower);
+      log.debug(`  • el.prop("${lower}") → ${val}`);
+    }
+
+    // 3) try uppercase
+    if (val == null) {
+      const upper = key.toUpperCase();
+      val = el.prop(upper);
+      log.debug(`  • el.prop("${upper}") → ${val}`);
+    }
+
+    map[key] = (val != null) ? val : '';
+    log.debug(`  → [Pmap] ${key} = "${map[key]}"`);
+  });
+
+  return map;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [X] Fetch all elements from the model
+// ─────────────────────────────────────────────────────────────────────────────
+function getAllElements() {
+  log.info('[getAllElements] Fetching all element proxies');
+  // toJsArray and $('element') come from commonUtils and jArchi 
+  const arr = toJsArray( $('element').toArray() );
+  log.debug(`[getAllElements] Retrieved ${arr.length} elements (sample IDs: ${arr.slice(0,3).map(e=>e.id).join(', ')}…)`);
+  return arr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [X] Build a map of elementId → outgoing relationships array
+// ─────────────────────────────────────────────────────────────────────────────
+function getAllElementRelationships(elements) {
+  log.info('[getAllElementRelationships] Building outgoing relationships map');
+  const matrix = conceptRelationshipMap(elements, 'out');
+  log.debug(`[getAllElementRelationships] Raw matrix size: ${matrix.length} rows`);
+  const header = matrix[0] || [];
+  const data   = matrix.slice(1);
+  // find indices
+  const idx = {
+    srcId:    header.indexOf('Source ID'),
+    relType:  header.indexOf('Relationship Type'),
+    relId:    header.indexOf('Relationship ID'),
+    tgtName:  header.indexOf('Target Name'),
+    tgtType:  header.indexOf('Target Type'),
+    tgtId:    header.indexOf('Target ID')
+  };
+  log.debug(`[getAllElementRelationships] Header fields → ${JSON.stringify(idx)}`);
+  const map = {};
+  data.forEach((row, i) => {
+    const sid = row[idx.srcId];
+    if (!sid) {
+      log.warn(`[getAllElementRelationships] Row ${i+1} missing Source ID; skipping`);
+      return;
+    }
+    map[sid] = map[sid] || [];
+    const rel = {
+      type:       row[idx.relType],
+      id:         row[idx.relId],
+      targetName: row[idx.tgtName],
+      targetType: row[idx.tgtType],
+      targetId:   row[idx.tgtId]
+    };
+    map[sid].push(rel);
+  });
+  log.info(`[getAllElementRelationships] Processed ${data.length} relationships into ${Object.keys(map).length} elements`);
+  return map;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [X] Build a map of elementId → array of views (diagrams) it appears in
+// ─────────────────────────────────────────────────────────────────────────────
+function getAllElementViews(elements) {
+  log.info('[getAllElementViews] Building element→views map');
+  const map = {};
+  elements.forEach(el => {
+    const vs = getElementViews(el) || [];
+    map[el.id] = Array.isArray(vs) ? vs : [];
+    log.debug(`[getAllElementViews] Element ${el.id} → ${map[el.id].length} views`);
+  });
+  return map;
+}
+
+function buildDataCache(propertyKeys) {
+  const elements  = getAllElements();
+  const relsByEl   = getAllElementRelationships(elements);
+  const viewsByEl  = getAllElementViews(elements);
+  const enriched   = elements.map(el => ({
+    id:            el.id,
+    name:          el.name,
+    type:          (typeof el.type === 'object' && el.type.name) ? el.type.name : el.type,
+    documentation: el.documentation || '',
+    Pmap:          buildPropMap(el, propertyKeys),
+    Ro:            relsByEl[el.id]   || [],
+    V:             viewsByEl[el.id]  || []
+  }));
+  return { elements, enriched, relsByEl, viewsByEl };
+}
+
+function dataCacheDiagnostics({ elements, relsByEl, viewsByEl }) {
+  const totalElements     = elements.length;
+  const totalRels         = Object.values(relsByEl).reduce((s,a)=>s+a.length,0);
+  const totalViewRefs     = Object.values(viewsByEl).reduce((s,a)=>s+a.length,0);
+  const uniqueViews = new Set(
+    [].concat(...Object.values(viewsByEl).map(vs =>
+        Array.isArray(vs) ? vs.map(v => v.id) : []
+    ))
+    ).size;
+
+  log.info('Cache diagnostics:');
+  log.info(`  • Elements:           ${totalElements}`);
+  log.info(`  • Relationships:      ${totalRels}`);
+  log.info(`  • Diagrams (views):   ${uniqueViews}`);
+  log.info(`  • View references:    ${totalViewRefs}`);
+
+  return { elements, relsByEl, viewsByEl };
+}
+
+// ── 6. Main ───────────────────────────────────────────────────────────────────
+try {
+  // 6.1 Ensure a model is loaded
+  let model = getActiveModel();
+  if (!model) {
+    if (CONFIG.modelName) {
+      ensureModelLoaded(CONFIG.modelName);
+      model = getActiveModel();
+      log.info(`Loaded model from config: ${model.name}`);
+    }
+    else {
+      const chosen = promptForModel('Select an Archi model to export');
+      ensureModelLoaded(chosen);
+      model = getActiveModel();
+      log.info(`User selected model: ${model.name}`);
+    }
+  }
+  else {
+    log.info(`Using active model: ${model.name}`);
+  }
+
+  // 6.2 Prepare specs & determine which properties we need
+  const specs = Object.entries(informationMap)
+                      .map(([hdr, str]) => [ hdr, parseSpec(str) ]);
+
+  const propSet = new Set();
+  specs.forEach(([,spec]) => {
+    // element.property fields
+    if (spec.sourceParts[0]==='element' && spec.sourceParts[1]==='property') {
+      propSet.add(spec.sourceParts[2]);
+    }
+    // any filterMap property references
+    Object.keys(spec.filterMap).forEach(fk => {
+      const fp = fk.split('.');
+      if (fp[0]==='element' && fp[1]==='property') {
+        propSet.add(fp[2]);
+      }
+    });
+  });
+  const propertyKeys = Array.from(propSet);
+
+  // 6.3 Build cache & diagnostics
+  const cache = buildDataCache(propertyKeys);
+  dataCacheDiagnostics(cache);
+
+  // 6.4 Generate flat records
+  // ── Record generation with array→string conversion ───────────────────────────
+    const records = cache.enriched.map(El => {
+    const rec = {};
+    specs.forEach(([hdr, spec]) => {
+        let v = evaluateSpec(spec, El);
+
+        // if we got an array (e.g. multiple rels or views), join into one cell
+        if (Array.isArray(v)) {
+        log.debug(`[generateRecords] "${hdr}" is an Array: [${v.join(', ')}] → joining`);
+        v = v.join(', ');
+        }
+
+        rec[hdr] = v;
+        log.debug(`[generateRecords] ${hdr} → "${v}"`);
+    });
+    return rec;
+    });
+
+  // 6.5 Export to Excel
+  saveDataToExcel({
+    data:       records,
+    outputFile: CONFIG.excelOutput,
+    sheetName:  'InformationMap',
+    headerList: Object.keys(informationMap)
+  });
+
+  log.info('► informationMapExporter: Export complete!');
+}
+catch (err) {
+  log.error('► informationMapExporter: FAILED → ' + err);
+  throw err;
+}

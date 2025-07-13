@@ -6,12 +6,12 @@
  * Then writes the enriched data (with model element IDs) back to an Excel file.
  *
  * For each record, this script:
- *  1. Loads the Excel file into an object via excelUtils.loadExcelData
+ *  1. Loads the Excel file into an object via fileUtil.loadExcelData
  *  2. Extracts `name`, `type`, and `documentation` per CONFIG.fieldMap
  *  3. Calls modelUtils.createOrRetrieveConcept({ name, type, documentation, action })
  *     to create, skip, duplicate, or update the element in the model
  *  4. Updates the in-memory data object with `model_id` = returned element ID
- *  5. Saves the enhanced data back to an Excel file via excelUtils.saveDataToExcel
+ *  5. Saves the enhanced data back to an Excel file via fileUtil.saveDataToExcel
  *
  * Includes diagnostics, validation of required headers, and logging at each step.
  *
@@ -41,7 +41,7 @@ var {
   loadExcelData, 
   filterDataNyConfigMap,
   saveDataToExcel  
-  } = require(__DIR__ +'/lib/excelUtils.ajs');
+  } = require(__DIR__ +'/lib/fileUtil.ajs');
 var { lookupAndExtend } = require(__DIR__ + '/lib/commonUtils.ajs');
 const log     = require(__DIR__ + "/lib/logger.ajs").log;
 

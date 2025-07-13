@@ -1,0 +1,228 @@
+/*
+ * info2excel.ajs
+ * --------------
+ * Export ArchiMate elements to Excel with per-field filtering.
+ *
+ * CONFIG keys (in .env):
+ *  - modelName      : optional string; name of the model to auto-select
+ *  - excelOutput    : absolute path to write the .xlsx file
+ *  - informationMap : JSON object literal, may span multiple lines:
+ *      informationMap={
+ *        "ABB Name":"element.name",
+ *        "Level":"element.properties.Level",
+ *        "Owner":"element.properties.owner",
+ *        "Views":"viewIn"
+ *      }
+ */
+
+// ── 1. Console setup ─────────────────────────────────────────────────────────
+console.clear();
+console.show();
+
+// ── 2. Load ENV and libs ────────────────────────────────────────────────────
+const libDir     = __DIR__ + 'lib/';
+console.log(`libDir: ${libDir}`);
+
+const envPath    = __DIR__ + '.env';
+console.log(`envPath: ${envPath}`);
+
+const CONFIG     = require(libDir + 'loadEnv.ajs').loadEnv(envPath);
+const { log }    = require(libDir + 'logger.ajs');
+const { ensureModelLoaded } = require(libDir + 'modelUtils.ajs');
+const { toJsArray }         = require(libDir + 'commonUtils.ajs');
+const dataUtils  = require(libDir + 'dataUtils.ajs');
+const fileUtil = require(libDir + 'fileUtil.ajs');
+
+// ── 3. Ensure model is selected ─────────────────────────────────────────────
+ensureModelLoaded(CONFIG.modelName);
+
+// ── 4. Read multiline JSON for informationMap ──────────────────────────────
+function getInfoMapFromEnv(path) {
+  const FR = Java.type('java.io.FileReader');
+  const BR = Java.type('java.io.BufferedReader');
+  const r = new BR(new FR(path));
+  let line, inBlock = false, buf = [];
+  while ((line = r.readLine()) !== null) {
+    const t = line.trim();
+    if (!inBlock) {
+      if (t.startsWith('informationMap=')) {
+        let after = t.slice(t.indexOf('=') + 1).trim();
+        if (after.startsWith('{') && after.endsWith('}')) {
+          buf.push(after);
+          break;
+        }
+        if (after.startsWith('{')) {
+          buf.push(after);
+          inBlock = true;
+        }
+      }
+    }
+    else {
+      buf.push(t);
+      if (t.endsWith('}')) break;
+    }
+  }
+  r.close();
+  if (!buf.length) throw new Error('informationMap block not found in ' + path);
+  const jsonText = buf.join('');
+  try {
+    return JSON.parse(jsonText);
+  }
+  catch (e) {
+    throw new Error('Failed to parse informationMap JSON: ' + e.message);
+  }
+}
+const infoMap = getInfoMapFromEnv(envPath);
+log.info(`Loaded informationMap with ${Object.keys(infoMap).length} entries.`);
+
+// ── 5. Helpers: glob→RegExp, parse specs, extract & filter ────────────────
+function globToRegex(pat) {
+  const s = String(pat).replace(/([.+^=!:${}()|[\]\/\\])/g,'\\$1');
+  return new RegExp('^'+s.replace(/\*/g,'.*').replace(/\?/g,'.')+'$','i');
+}
+
+function parseFieldSpec(header, spec) {
+  const idx = spec.indexOf(' where ');
+  const extractor = (idx> -1 ? spec.slice(0,idx) : spec).trim();
+  const filters = [];
+  if (idx > -1) {
+    let clause = spec.slice(idx+7).trim();
+    if (clause.startsWith('{') && clause.endsWith('}')) {
+      clause = clause.slice(1,-1);
+      let buf='', depth=0, inQ=false, exprs=[];
+      for (let ch of clause) {
+        if (ch === '"' && !inQ) inQ = true;
+        else if (ch === '"' && inQ) inQ = false;
+        if (!inQ) {
+          if (ch==='[') depth++;
+          else if (ch===']') depth--;
+          else if (ch===',' && depth===0) { exprs.push(buf.trim()); buf=''; continue; }
+        }
+        buf += ch;
+      }
+      if (buf.trim()) exprs.push(buf.trim());
+      exprs.forEach(expr=>{
+        let [path,val] = expr.split('=').map(s=>s.trim());
+        if (!path||typeof val==='undefined') return;
+        if (val.startsWith('[')) {
+          const arr = JSON.parse(val.replace(/'/g,'"'));
+          filters.push({ path, op:'in', regex: arr.map(globToRegex) });
+        } else {
+          val = val.replace(/^["']|["']$/g,'');
+          filters.push({ path, op:'eq', regex: [globToRegex(val)] });
+        }
+      });
+    }
+  }
+  log.info(`Spec "${header}": extractor="${extractor}", filters=${filters.length}`);
+  return { header, extractor, filters };
+}
+
+const fieldSpecs = [];
+Object.entries(infoMap).forEach(([hdr,spec])=>{
+  fieldSpecs.push(parseFieldSpec(hdr, spec));
+});
+
+function extractValue(ctx, token) {
+  const el = ctx.element;
+  // properties (case-insensitive lookup + normalize)
+  if (token.startsWith('element.properties.')) {
+    const prop = token.slice(19);
+    const raw = dataUtils.getPropertyIgnoreCase(el, prop);
+    return dataUtils.normalize(raw);
+  }
+  // relationship.out, in, any
+  if (token.startsWith('relationship.')) {
+    const parts = token.split('.');
+    const dir = parts[1];
+    const rels = dir==='out'? el.outRels() : dir==='in'? el.inRels() : el.rels();
+    if (parts.length===2) return rels.length;
+    const chain = parts.slice(2);
+    const vals = rels.map(r=>{
+      let v=r;
+      for(let k of chain) {
+        v = k==='targetName'? r.target && r.target.name
+          : k==='targetType'? r.target && r.target.type
+          : k==='sourceName'? r.source && r.source.name
+          : k==='sourceType'? r.source && r.source.type
+          : v[k];
+        if (v==null) break;
+      }
+      return v;
+    }).filter(x=>x!=null);
+    return vals.join(', ');
+  }
+  // viewIn: diagram-object based
+  if (token==='viewIn') {
+    const refs = el.objectRefs('diagram-object');
+    const names = refs.map(o=>o.view && o.view.name).filter(n=>n);
+    return [...new Set(names)].join(', ');
+  }
+  // fallback: dot-path getX or property
+  let cur = ctx;
+  for (let part of token.split('.')) {
+    if (!cur) return '';
+    if (cur.prop) {
+      const p = cur.prop(part);
+      if (p!=null) { cur = p; continue; }
+    }
+    const m = 'get'+part.charAt(0).toUpperCase()+part.slice(1);
+    cur = typeof cur[m]==='function'? cur[m]() : cur[part];
+  }
+  return cur;
+}
+
+function passesFilters(ctx, filters) {
+  return filters.every(f => {
+    const v = String(extractValue(ctx, f.path));
+    return f.op==='in'
+      ? f.regex.some(rx=>rx.test(v))
+      : f.regex[0].test(v);
+  });
+}
+
+// ── 6. Gather rows ─────────────────────────────────────────────────────────
+function gatherModelData() {
+  log.info('Collecting elements…');
+  const arr = $('element').toArray();
+  log.info(`Found ${arr.length} elements.`);
+  const elems = toJsArray(arr);
+
+  const headers = fieldSpecs.map(f=>f.header);
+  const rows = [];
+  elems.forEach(el=>{
+    const ctx = { element: el };
+    let any = false;
+    const row = {};
+    fieldSpecs.forEach(f=>{
+      let val = '';
+      if (!f.filters.length || passesFilters(ctx, f.filters)) {
+        val = extractValue(ctx, f.extractor) || '';
+        if (`${val}`.trim()) any = true;
+      }
+      row[f.header] = val;
+    });
+    if (any) {
+      row['ArchiMateId'] = el.getId();
+      rows.push(row);
+    }
+  });
+  log.info(`Matched ${rows.length} rows.`);
+  return { headers:[...headers,'ArchiMateId'], data:rows };
+}
+
+const { headers, data } = gatherModelData();
+
+// ── 7. Export to Excel ──────────────────────────────────────────────────────
+function exportToExcel(hdrs, rows, outFile) {
+  log.info(`Writing ${rows.length} rows to ${outFile}`);
+  fileUtil.saveDataToExcel({
+    data       : rows,
+    outputFile : outFile,
+    sheetName  : 'Model Export',
+    headerList : hdrs
+  });
+  log.info('Excel export complete.');
+}
+
+exportToExcel(headers, data, CONFIG.excelOutput);

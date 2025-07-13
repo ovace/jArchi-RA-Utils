@@ -23,7 +23,7 @@
 
   const utils  = require(libPath + 'commonUtils.ajs');
   const { data2Records } = require(libPath + 'dataUtils.ajs');
-  const { loadAndPrepareSheet } = require(libPath +'excelUtils.ajs');
+  const { loadAndPrepareSheet } = require(libPath +'fileUtil.ajs');
   const { getModelData,  mapModelDataToRecords, getModelBlankEntries } = require(libPath +'modelUtils.ajs');
   
   const XLSX   = require(libPath + 'xlsx.full.min.js');
