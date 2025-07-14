@@ -6,40 +6,38 @@
  *  - `informationMap` mapping headers to element‐field specs + group
  *
  * Fully instrumented with debug/info/warn/error logs for traceability.
- *
- * Usage: Run in jArchi (Script → Run Script…).
  */
 
 // ── 1. Console setup ─────────────────────────────────────────────────────────
-console.clear();
-console.show();
+console.clear();                       // [Good]
+console.show();                        // [Good]
 
 // ── 2. Load ENV and libraries ────────────────────────────────────────────────
-const libDir   = __DIR__ + 'lib/';
-console.log(`libDir:  ${libDir}`);
-const envPath  = __DIR__ + '.env';
-console.log(`envPath: ${envPath}`);
-const CONFIG   = require(libDir + 'loadEnv.ajs').loadEnv(envPath);
+const libDir   = __DIR__ + 'lib/';     // [Good]
+console.log(`libDir:  ${libDir}`);     // [Good]
+const envPath  = __DIR__ + '.env';     // [Good]
+console.log(`envPath: ${envPath}`);    // [Good]
+const CONFIG   = require(libDir + 'loadEnv.ajs').loadEnv(envPath);  // [Good]
 
-const { log } = require(libDir + 'logger.ajs');
-const common   = require(libDir + 'commonUtils.ajs');
-const toJsArray = common.toJsArray;
-
+const { log }     = require(libDir + 'logger.ajs');                // [Good]
+const common      = require(libDir + 'commonUtils.ajs');          // [Good]
+const toJsArray   = common.toJsArray;                             // [Good]
 const {
   promptForModel,
   getActiveModel,
   ensureModelLoaded,
   getElementViews,
   conceptRelationshipMap
-} = require(libDir + 'modelUtils.ajs');
-
-const { saveDataToExcel } = require(libDir + 'fileUtils.ajs');
-
+} = require(libDir + 'modelUtils.ajs');                             // [Good]
+const { saveDataToExcel } = require(libDir + 'fileUtils.ajs');     // [Good]
 
 // ── 3. JSON / ENV Helpers ───────────────────────────────────────────────────
 
+/**
+ * parseJsonOrObject [Good]
+ */
 function parseJsonOrObject(input) {
-  log.debug(`[parseJsonOrObject] input type=${typeof input}`);
+  log.debug(`[parseJsonOrObject] type=${typeof input}`);
   if (input && typeof input === 'object') return input;
   let str = String(input||'').trim();
   if (!str) throw new Error('Empty input for JSON parse');
@@ -55,320 +53,409 @@ function parseJsonOrObject(input) {
   }
 }
 
+/**
+ * readEnvBlock [Fixed]
+ *   – Reads the `{…}` block for key, skipping any line whose first non-ws char is `#`.
+ */
 function readEnvBlock(key) {
-  log.debug(`[readEnvBlock] extracting ${key}`);
+  log.debug(`[readEnvBlock] extracting block for "${key}"`);
   const Files   = Java.type('java.nio.file.Files');
   const Paths   = Java.type('java.nio.file.Paths');
-  const content = new java.lang.String(Files.readAllBytes(Paths.get(envPath)),'UTF-8');
-  const lines   = content.split(/\r?\n/);
-  let capturing=false, depth=0, block=[];
-  for(let line of lines){
-    if(!capturing){
-      const idx=line.indexOf(key+'=');
-      if(idx>=0){
-        const after=line.substring(idx+key.length+1);
-        const bi=after.indexOf('{');
-        if(bi>=0){
-          capturing=true;
-          const rest=after.substring(bi).replace(/^\s*#\s?/,'');
-          block.push(rest);
-          for(let ch of rest){ if(ch==='{' )depth++; else if(ch==='}')depth--; }
-          if(depth===0) break;
+  const content = new java.lang.String(
+    Files.readAllBytes(Paths.get(envPath)), 'UTF-8'
+  ).split(/\r?\n/);
+  let capturing = false, depth = 0, blockLines = [];
+
+  for (let line of content) {
+    if (!capturing) {
+      const idx = line.indexOf(key+'=');
+      if (idx >= 0) {
+        const after = line.substring(idx + key.length +1);
+        const brace = after.indexOf('{');
+        if (brace >= 0) {
+          capturing = true;
+          const rest = after.substring(brace);
+          if (!rest.trim().startsWith('#')) {
+            blockLines.push(rest);
+            for (let ch of rest) {
+              if (ch==='{') depth++;
+              else if (ch==='}') depth--;
+            }
+          }
+          if (depth===0) break;
         }
       }
-    } else {
-      const clean=line.replace(/^\s*#\s?/,'');
-      block.push(clean);
-      for(let ch of clean){ if(ch==='{' )depth++; else if(ch==='}')depth--; }
-      if(depth===0) break;
+    }
+    else {
+      if (line.trim().startsWith('#')) continue;
+      blockLines.push(line);
+      for (let ch of line) {
+        if (ch==='{') depth++;
+        else if (ch==='}') depth--;
+      }
+      if (depth===0) break;
     }
   }
-  if(!capturing) { log.warn(`[readEnvBlock] no ${key}`); return null }
-  if(depth!==0) log.warn(`[readEnvBlock] braces unbalanced for ${key}`);
-  return block.join('\n');
+
+  if (!capturing) {
+    log.warn(`[readEnvBlock] no block found for "${key}"`);
+    return null;
+  }
+  if (depth !== 0) {
+    log.warn(`[readEnvBlock] braces unbalanced for "${key}", depth=${depth}`);
+  }
+  const block = blockLines.join('\n');
+  log.debug(`[readEnvBlock] got ${block.length} chars for "${key}"`);
+  return block;
 }
 
+/**
+ * parseEnvBlockOrRaw [Good]
+ */
 function parseEnvBlockOrRaw(key, raw) {
   log.debug(`[parseEnvBlockOrRaw] key=${key}`);
-  let str=raw;
-  if(typeof str==='string' && !str.trim().endsWith('}')){
-    const blk=readEnvBlock(key);
-    if(blk) str=blk;
+  let str = raw;
+  if (typeof str==='string' && !str.trim().endsWith('}')) {
+    const blk = readEnvBlock(key);
+    if (blk) str = blk;
   }
-  if(!str) throw new Error(`${key} is required`);
-  const obj=parseJsonOrObject(str);
-  if(typeof obj!=='object'||Array.isArray(obj)) throw new Error(`Invalid ${key}`);
+  if (!str) throw new Error(`${key} is required`);
+  const obj = parseJsonOrObject(str);
+  if (typeof obj!=='object'||Array.isArray(obj)) throw new Error(`Invalid ${key}`);
   log.info(`${key} entries=${Object.keys(obj).length}`);
   return obj;
 }
 
-
 // ── 4. Spec parsing & evaluation ─────────────────────────────────────────────
 
+/**
+ * parseSpec [Good]
+ */
 function parseSpec(specString) {
   log.debug(`[parseSpec] ${specString}`);
-  const parts=specString.split(/\s+where\s+/i),
-        source=parts[0].trim(),
-        filterMap={};
-  if(parts[1]){
+  const parts = specString.split(/\s+where\s+/i),
+        source = parts[0].trim(),
+        filterMap = {};
+  if (parts[1]) {
     parts[1].trim().replace(/^\{|\}$/g,'')
       .split(/\s*,\s*/).forEach(cond=>{
-        const [k,v]=cond.split('=').map(s=>s.trim());
-        try{ filterMap[k]=eval(v) }
-        catch(e){ log.error(`parseSpec filter ${k} eval failed: ${e}`); filterMap[k]=[] }
+        const [k,v] = cond.split('=').map(s=>s.trim());
+        try { filterMap[k] = eval(v); }
+        catch(e){ log.error(`parseSpec filter ${k} failed: ${e}`); filterMap[k]=[]; }
       });
   }
-  const sourceParts=source.split('.').map(s=>s.trim());
+  const sourceParts = source.split('.').map(s=>s.trim());
   return { source, sourceParts, filterMap };
 }
 
+/**
+ * getValueByPath [Good]
+ */
 function getValueByPath(ctx, pathParts) {
   return pathParts.reduce((o,k,i)=>{
-    const v=(o&&o[k]!=null)?o[k]:null;
-    if(v===null&&o!==null) log.debug(`getValueByPath miss ${k}@${i}`);
+    const v = (o&&o[k]!=null)?o[k]:null;
+    if (v===null && o!==null) log.debug(`getValueByPath miss ${k}@${i}`);
     return v;
-  },ctx);
+  }, ctx);
 }
 
-function evaluateSpec(spec,El) {
-  const sp=spec.sourceParts.map(p=>p.trim());
-  if(sp[0]==='element'&&sp[1]==='relationship') sp.shift();
-  // element.*
-  if(sp[0]==='element'){
-    for(let fk in spec.filterMap){
-      const val=getValueByPath({element:El,property:El.Pmap},fk.split('.'));
-      if(!spec.filterMap[fk].includes(val)) return null;
+/**
+ * evaluateSpec [Good]
+ */
+function evaluateSpec(spec, El) {
+  const sp = spec.sourceParts.map(p=>p.trim());
+  if (sp[0]==='element'&&sp[1]==='relationship') sp.shift();
+  if (sp[0]==='element') {
+    for (let fk in spec.filterMap) {
+      const val = getValueByPath({element:El,property:El.Pmap}, fk.split('.'));
+      if (!spec.filterMap[fk].includes(val)) return null;
     }
-    if(sp[1]==='property') return El.Pmap[sp[2]]||'';
-    if(sp[1]==='inView') return El.V.map(v=>v.name);
+    if (sp[1]==='property') return El.Pmap[sp[2]]||'';
+    if (sp[1]==='inView')   return El.V.map(v=>v.name);
     return El[sp[1]]||'';
   }
-  // relationship.out/in.*
-  if(sp[0]==='relationship'&&(sp[1]==='out'||sp[1]==='in')){
-    const rels=(sp[1]==='out'?El.Ro:El.Ri)||[];
-    const filtered=rels.filter(r=>{
-      for(let fk in spec.filterMap){
-        const fp=fk.split('.');
-        const val=(fp[0]==='target')
-          ?getValueByPath({target:{type:r.targetType,name:r.targetName}},fp)
-          :getValueByPath({relationship:r},fp);
-        if(!spec.filterMap[fk].includes(val)) return false;
+  if (sp[0]==='relationship'&&(sp[1]==='out'||sp[1]==='in')) {
+    const rels = (sp[1]==='out'?El.Ro:El.Ri)||[];
+    const filtered = rels.filter(r=>{
+      for (let fk in spec.filterMap) {
+        const fp = fk.split('.');
+        const val = fp[0]==='target'
+          ? getValueByPath({ target:{ type:r.targetType, name:r.targetName } }, fp)
+          : getValueByPath({ relationship:r }, fp);
+        if (!spec.filterMap[fk].includes(val)) return false;
       }
       return true;
     });
-    if(sp[2]==='target'&&sp[3]) return filtered.map(r=>sp[3]==='name'?r.targetName:r.targetType);
-    if(['targetName','targetType'].includes(sp[2])) return filtered.map(r=>r[sp[2]]);
+    if (sp[2]==='target'&&sp[3]) {
+      return filtered.map(r=>sp[3]==='name'?r.targetName:r.targetType);
+    }
+    if (['targetName','targetType'].includes(sp[2])) {
+      return filtered.map(r=>r[sp[2]]);
+    }
     return filtered.map(r=>r[sp[2]]||null);
   }
-  log.warn(`evaluateSpec unsupported ${spec.source}`);
+  log.warn(`evaluateSpec unsupported: ${spec.source}`);
   return null;
 }
 
-
 // ── 5. Property Mapping ───────────────────────────────────────────────────────
 
-function buildPropMap(el,propertyKeys){
+/**
+ * buildPropMap [Changed]
+ * Case-insensitive el.prop(key) lookup.
+ */
+function buildPropMap(el, propertyKeys) {
   log.debug(`buildPropMap el=${el.id}`);
-  const map={};
-  propertyKeys.forEach(key=>{
-    let v=null;
-    try{ v=el.prop(key) } catch{}
-    if(v==null) try{ v=el.prop(key.toLowerCase()) } catch{}
-    if(v==null) try{ v=el.prop(key.toUpperCase()) } catch{}
-    map[key]= v!=null ? v.toString() : '';
+  const map = {};
+  propertyKeys.forEach(key => {
+    let v = null;
+    try { v = el.prop(key); } catch{}
+    if (v==null) try { v = el.prop(key.toLowerCase()); } catch{}
+    if (v==null) try { v = el.prop(key.toUpperCase()); } catch{}
+    map[key] = v != null ? v.toString() : '';
   });
   return map;
 }
 
-
 // ── 6. Data Cache & Diagnostics ───────────────────────────────────────────────
 
-function getAllElements(){
+/**
+ * getAllElements [Good]
+ */
+function getAllElements() {
   log.info('getAllElements');
   return toJsArray($('element').toArray());
 }
 
-function getAllElementRelationships(elements){
+/**
+ * getAllElementRelationships [Good]
+ */
+function getAllElementRelationships(elements) {
   log.info('getAllElementRelationships');
-  const m=conceptRelationshipMap(elements,'out'),
-        hdr=m[0]||[], data=m.slice(1),
-        idx={srcId:hdr.indexOf('Source ID'),
-             relType:hdr.indexOf('Relationship Type'),
-             relId:hdr.indexOf('Relationship ID'),
-             tgtName:hdr.indexOf('Target Name'),
-             tgtType:hdr.indexOf('Target Type'),
-             tgtId:hdr.indexOf('Target ID')};
-  const map={};
+  const m   = conceptRelationshipMap(elements,'out'),
+        hdr = m[0]||[], data=m.slice(1),
+        idx = {
+          srcId:   hdr.indexOf('Source ID'),
+          relType: hdr.indexOf('Relationship Type'),
+          relId:   hdr.indexOf('Relationship ID'),
+          tgtName: hdr.indexOf('Target Name'),
+          tgtType: hdr.indexOf('Target Type'),
+          tgtId:   hdr.indexOf('Target ID')
+        };
+  const map = {};
   data.forEach(r=>{
-    const sid=r[idx.srcId];
-    if(!sid) return;
-    map[sid]=map[sid]||[];
+    const sid = r[idx.srcId];
+    if (!sid) return;
+    map[sid] = map[sid]||[];
     map[sid].push({
-      type:r[idx.relType],
-      id:r[idx.relId],
-      targetName:r[idx.tgtName],
-      targetType:r[idx.tgtType],
-      targetId:r[idx.tgtId]
+      type:       r[idx.relType],
+      id:         r[idx.relId],
+      targetName: r[idx.tgtName],
+      targetType: r[idx.tgtType],
+      targetId:   r[idx.tgtId]
     });
   });
   return map;
 }
 
-function getAllElementViews(elements){
+/**
+ * getAllElementViews [Good]
+ */
+function getAllElementViews(elements) {
   log.info('getAllElementViews');
-  const map={};
+  const map = {};
   elements.forEach(el=>{
-    const vs=getElementViews(el)||[];
-    map[el.id]=Array.isArray(vs)?vs:[];
+    const vs = getElementViews(el)||[];
+    map[el.id] = Array.isArray(vs)?vs:[];
   });
   return map;
 }
 
-function buildDataCache(propertyKeys){
+/**
+ * buildDataCache [Good]
+ */
+function buildDataCache(propertyKeys) {
   log.info('buildDataCache');
-  const elements=getAllElements(),
-        relsByEl=getAllElementRelationships(elements),
-        viewsByEl=getAllElementViews(elements),
-        enriched=elements.map(el=>({
-          id:el.id,
-          name:el.name,
-          type:(el.type&&el.type.name)?el.type.name:el.type,
-          documentation:el.documentation||'',
-          Pmap:buildPropMap(el,propertyKeys),
-          Ro:relsByEl[el.id]||[],
-          V:viewsByEl[el.id]||[]
+  const elements  = getAllElements(),
+        relsByEl  = getAllElementRelationships(elements),
+        viewsByEl = getAllElementViews(elements),
+        enriched  = elements.map(el=>({
+          id:            el.id,
+          name:          el.name,
+          type:          (el.type&&el.type.name)?el.type.name:el.type,
+          documentation: el.documentation||'',
+          Pmap:          buildPropMap(el,propertyKeys),
+          Ro:            relsByEl[el.id]||[],
+          V:             viewsByEl[el.id]||[]
         }));
-  return {elements,enriched,relsByEl,viewsByEl};
+  log.info(`Enriched elements count=${enriched.length}`);
+  return { elements, enriched, relsByEl, viewsByEl };
 }
 
-function dataCacheDiagnostics({elements,relsByEl,viewsByEl}){
-  const totalEl=elements.length,
-        totalR=Object.values(relsByEl).reduce((s,a)=>s+a.length,0),
-        totalV=Object.values(viewsByEl).reduce((s,a)=>s+a.length,0),
-        uniqueV=new Set([].concat(...Object.values(viewsByEl).map(vs=>vs.map(v=>v.id)))).size;
-  log.info(`Elements:${totalEl} Rels:${totalR} ViewRefs:${totalV} UniqueViews:${uniqueV}`);
-  return {elements,relsByEl,viewsByEl};
+/**
+ * dataCacheDiagnostics [Good]
+ */
+function dataCacheDiagnostics({ elements, relsByEl, viewsByEl }) {
+  const totalEl = elements.length,
+        totalR  = Object.values(relsByEl).reduce((s,a)=>s+a.length,0),
+        totalV  = Object.values(viewsByEl).reduce((s,a)=>s+a.length,0),
+        uniqueV = new Set(
+          [].concat(...Object.values(viewsByEl).map(vs=>vs.map(v=>v.id)))
+        ).size;
+  log.info(`Cache ⇒ Elements:${totalEl}, Rels:${totalR}, ViewRefs:${totalV}, UniqueViews:${uniqueV}`);
+  return { elements, relsByEl, viewsByEl };
 }
 
+// ── 7. Parse filterGroups & informationMap ───────────────────────────────────
 
-// ── 7. Parse filterGroups & informationMap ────────────────────────────────────
-
-const filterGroupsRaw   = parseEnvBlockOrRaw('filterGroups',CONFIG.filterGroups);
-const informationMapRaw = parseEnvBlockOrRaw('informationMap',CONFIG.informationMap);
+const filterGroupsRaw   = parseEnvBlockOrRaw('filterGroups',   CONFIG.filterGroups);  // [Good]
+let   informationMapRaw = parseEnvBlockOrRaw('informationMap', CONFIG.informationMap); // [Good]
 
 /**
  * infoEntries [Good]
  */
-const infoEntries = Object.entries(informationMapRaw).map(([hdr,obj])=>{
-  let sourceStr,group;
-  if(typeof obj==='string'){
-    sourceStr=obj;
-    group=Object.keys(filterGroupsRaw).find(g=>hdr.startsWith(g))||null;
+let infoEntries = Object.entries(informationMapRaw).map(([hdr,obj]) => {
+  let sourceStr, group;
+  if (typeof obj === 'string') {
+    sourceStr = obj;
+    group     = Object.keys(filterGroupsRaw).find(g => hdr.startsWith(g)) || null;
   } else {
-    sourceStr=obj.source;
-    group=obj.group===undefined?null:obj.group;
+    sourceStr = obj.source;
+    group     = obj.group===undefined?null:obj.group;
   }
-  return {header:hdr,spec:parseSpec(sourceStr),group};
+  return { header: hdr, spec: parseSpec(sourceStr), group };
+});
+
+/**
+ * Normalize any "<Group> <SharedName>" → shared columns [Fixed]
+ */
+const groupNames  = Object.keys(filterGroupsRaw);
+const sharedNames = infoEntries.filter(e=>e.group===null).map(e=>e.header);
+
+infoEntries = infoEntries.map(e => {
+  if (e.group && e.header.startsWith(e.group + ' ')) {
+    const suffix = e.header.slice(e.group.length+1);
+    if (sharedNames.includes(suffix)) {
+      log.debug(`[normalizeEntries] "${e.header}"→"${suffix}"`);
+      return { header: suffix, spec: e.spec, group: null };
+    }
+  }
+  return e;
 });
 
 /**
  * filterSpecs [Added]
  */
 const filterSpecs = Object.entries(filterGroupsRaw).reduce((acc,[grp,def])=>{
-  acc[grp]=def.or.map(c=>({
-    spec:parseSpec(c.key),
-    values:Array.isArray(c.values)?c.values:[c.values]
+  acc[grp] = def.or.map(c=>({
+    spec:   parseSpec(c.key),
+    values: Array.isArray(c.values)?c.values:[c.values]
   }));
   return acc;
-},{});
+}, {});
 
 /**
  * normalizeValue [Added]
  */
-function normalizeValue(v){
+function normalizeValue(v) {
   return String(v||'').toLowerCase().replace(/[\s-]+/g,'');
 }
 
 /**
  * evaluateFilterGroup [Changed]
+ * Coerces both spec output and filter values via normalizeValue.
  */
-function evaluateFilterGroup(group,El){
-  const clauses=filterSpecs[group]||[];
-  return clauses.some(({spec,values})=>{
-    const out=evaluateSpec(spec,El);
-    if(out==null) return false;
-    const arr=Array.isArray(out)?out:[out];
-    const normOut=arr.map(normalizeValue);
-    const normVals=values.map(normalizeValue);
-    return normOut.some(o=>normVals.includes(o));
+function evaluateFilterGroup(group, El) {
+  const clauses = filterSpecs[group] || [];
+  return clauses.some(({ spec, values }) => {
+    const out = evaluateSpec(spec, El);
+    if (out == null) return false;
+    const arr     = Array.isArray(out) ? out : [out];
+    const normOut = arr.map(normalizeValue);
+    const normVal = values.map(normalizeValue);
+    return normOut.some(o => normVal.includes(o));
   });
 }
 
 /**
  * generateFilteredRecords [Changed]
  */
-function generateFilteredRecords(elements){
-  const headers=Object.keys(informationMapRaw), recs=[];
-  elements.forEach(El=>{
-    const matched=Object.keys(filterSpecs).filter(g=>evaluateFilterGroup(g,El));
-    if(matched.length===0) return;
-    const group=matched[0],rec={};
-    infoEntries.filter(e=>e.group===group||e.group===null)
+function generateFilteredRecords(elements) {
+  const headers = Array.from(new Set(infoEntries.map(e=>e.header))),
+        recs    = [];
+  elements.forEach(El => {
+    const matched = Object.keys(filterSpecs).filter(g=>evaluateFilterGroup(g,El));
+    if (!matched.length) return;
+    const group = matched[0], rec = {};
+    infoEntries
+      .filter(e=>e.group===group||e.group===null)
       .forEach(e=>{
-        let v=evaluateSpec(e.spec,El);
-        if(Array.isArray(v)) v=v.join(', ');
-        rec[e.header]=v;
+        let v = evaluateSpec(e.spec, El);
+        if (Array.isArray(v)) v = v.join(', ');
+        rec[e.header] = v;
       });
-    headers.forEach(h=>{ if(!(h in rec)) rec[h]='' });
+    headers.forEach(h=>{ if (!(h in rec)) rec[h] = ''; });
     recs.push(rec);
   });
   return recs;
 }
 
-
 // ── 8. Main ───────────────────────────────────────────────────────────────────
 try {
-  let model=getActiveModel();
-  if(!model){
-    if(CONFIG.modelName){
+  let model = getActiveModel();
+  if (!model) {
+    if (CONFIG.modelName) {
       ensureModelLoaded(CONFIG.modelName);
-      model=getActiveModel();
+      model = getActiveModel();
     } else {
-      const choice=promptForModel('Select model');
+      const choice = promptForModel('Select an Archi model to export');
       ensureModelLoaded(choice);
-      model=getActiveModel();
+      model = getActiveModel();
     }
   }
-  // Gather propertyKeys
-  const propSet=new Set();
+
+  // Determine propertyKeys [Changed]
+  const propSet = new Set();
   infoEntries.forEach(e=>{
-    const sp=e.spec.sourceParts;
-    if(sp[0]==='element'&&sp[1]==='property') propSet.add(sp[2]);
+    const sp = e.spec.sourceParts;
+    if (sp[0]==='element'&&sp[1]==='property') propSet.add(sp[2]);
   });
   Object.values(filterSpecs).forEach(clauses=>
-    clauses.forEach(({spec})=>{
-      const sp=spec.sourceParts;
-      if(sp[0]==='element'&&sp[1]==='property') propSet.add(sp[2]);
+    clauses.forEach(({ spec })=>{
+      const sp = spec.sourceParts;
+      if (sp[0]==='element'&&sp[1]==='property') propSet.add(sp[2]);
       Object.keys(spec.filterMap).forEach(fk=>{
         const fp=fk.split('.');
-        if(fp[0]==='element'&&fp[1]==='property') propSet.add(fp[2]);
+        if (fp[0]==='element'&&fp[1]==='property') propSet.add(fp[2]);
       });
     })
   );
-  const propertyKeys=Array.from(propSet);
+  const propertyKeys = Array.from(propSet);
 
-  const cache=buildDataCache(propertyKeys);
+  // Cache & diagnostics [Good]
+  const cache = buildDataCache(propertyKeys);
   dataCacheDiagnostics(cache);
 
-  const records=generateFilteredRecords(cache.enriched);
+  // Generate records [Good]
+  const records = generateFilteredRecords(cache.enriched);
+
+  // Build dynamic headerList [Changed]
+  const groupHeaders  = infoEntries.filter(e=>e.group!==null).map(e=>e.header);
+  const sharedHeaders = infoEntries.filter(e=>e.group===null).map(e=>e.header);
+  const headerList    = [...groupHeaders, ...sharedHeaders];
+  log.info(`Using headerList: ${headerList.join(', ')}`);
+
+  // Export [Good]
   saveDataToExcel({
-    data:records,
-    outputFile:CONFIG.excelOutput,
-    sheetName:'InformationMap',
-    headerList:Object.keys(informationMapRaw)
+    data:       records,
+    outputFile: CONFIG.excelOutput,
+    sheetName:  'InformationMap',
+    headerList: headerList
   });
+
+  log.info('► informationMapExporter: Export complete!');
 }
-catch(err){
-  log.error(`informationMapExporter FAILED → ${err}`);
+catch(err) {
+  log.error('► informationMapExporter: FAILED → ' + err);
   throw err;
 }
